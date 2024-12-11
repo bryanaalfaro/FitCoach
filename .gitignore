@@ -1,0 +1,8 @@
+# IDE
+.idea
+.vscode
+# Python
+*__pycache__*
+*.py[cod]
+*.cpython-36.pyc
+*.egg-info
