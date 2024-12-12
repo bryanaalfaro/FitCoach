@@ -53,14 +53,28 @@ docker run --gpus all --name fitcoach -it --rm fitcoach
 
 ### Download Checkpoints
 
-First, download the LLaMA-2-7B checkpoint available [here](https://huggingface.co/meta-llama/Llama-2-7b). Next, download the weights of the 3D CNN and the Stream-VLM model,
+First, download the LLaMA-2-7B checkpoint available [here](https://huggingface.co/meta-llama/Llama-2-7b). Next, download the weights of the 3D CNN,
 
 ```
 wget --no-check-certificate -P ./ckpts_efficientnet https://github.com/Qualcomm-AI-research/FitCoach/releases/download/v1.0/efficientnet_3d_cnn_weights.tar.gz
-wget --no-check-certificate -P ./ckpts_streamvlm https://github.com/Qualcomm-AI-research/FitCoach/releases/download/v1.0/streamvlm_weights.tar.gz
 ``` 
 
+and then download the weights of the Stream-VLM model which is chuncked into six parts,
+```
+wget --no-check-certificate -P ./ckpts_streamvlm https://github.com/Qualcomm-AI-research/FitCoach/releases/download/v1.0/streamvlm_weights.tar.gz.aa
+wget --no-check-certificate -P ./ckpts_streamvlm https://github.com/Qualcomm-AI-research/FitCoach/releases/download/v1.0/streamvlm_weights.tar.gz.ab
+wget --no-check-certificate -P ./ckpts_streamvlm https://github.com/Qualcomm-AI-research/FitCoach/releases/download/v1.0/streamvlm_weights.tar.gz.ac
+wget --no-check-certificate -P ./ckpts_streamvlm https://github.com/Qualcomm-AI-research/FitCoach/releases/download/v1.0/streamvlm_weights.tar.gz.ad
+wget --no-check-certificate -P ./ckpts_streamvlm https://github.com/Qualcomm-AI-research/FitCoach/releases/download/v1.0/streamvlm_weights.tar.gz.ae
+wget --no-check-certificate -P ./ckpts_streamvlm https://github.com/Qualcomm-AI-research/FitCoach/releases/download/v1.0/streamvlm_weights.tar.gz.af
+```
+
 The above commands will download the 3D CNN and the Stream-VLM model weights to *./ckpts_efficientnet* and *./ckpts_streamvlm* respectively. These paths can be updated as necessary, please update the *docker run* command to mount the volume for these paths in the docker container.
+
+To extract the weights from the respective tar archives use the *tar xf* command. For the chuncked *streamvlm_weights.tar.gz* archive use the following command,
+```
+cat streamvlm_weights.tar.gz* | tar xf -
+```
 
 Finally, to obtain the LLM-Acc metric download the LLaMA-3-70B-Instruct weights (and tokenizer) available [here](https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct).
 
