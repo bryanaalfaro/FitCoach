@@ -25,17 +25,17 @@ model:
 
 datasets:
     test:
-        name: 'fitcoach-dataset'
+        name: 'custom-dataset'
         relevant_column: 'query'  # 'class'
         use_tokenized_data_only: False
         skip_tokenization: True
         force_collate: True
         kwargs:
-            data_root: './data'
-            split: 'train'
+            data_root: './data/custom_videos'
+            split: 'test'
 
 evaluator:
-    name: 'interactive_feedback_evaluator'
+    name: 'video_only_evaluator'
     kwargs:
         feedbacks_save_folder: './saved_feedbacks/'
         feedbacks_save_file_name: 'streamvlm_responses'

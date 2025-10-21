@@ -6,7 +6,7 @@ import json
 import os
 from collections import defaultdict
 from typing import Any
-
+import random
 import numpy as np
 from datasets import Dataset
 from tqdm import tqdm
@@ -58,7 +58,7 @@ def get_feedback_span(
 
     assert len(feedback_spans) == len(
         feedback_timestamps
-    ), "The number of feedbacks must equal the number of timestamps."
+    ), f"The number of feedbacks {len(feedbacks)} must equal the number of timestamps {len(feedback_timestamps)}."
 
     return feedback_spans
 
@@ -126,7 +126,9 @@ def prepare_single_exercise_segments(
     """
     # Load video timestamps
     video_timestamps = load_video_timestamps(os.path.join(data_dir, record["video_timestamps"]))
+    print(f"Video timestamps file: {os.path.join(data_dir, record['video_timestamps'])}")
     feedback_timestamps = record["feedback_timestamps"]
+
 
     segments = []
     # Loop over all exercises transitions
@@ -162,9 +164,78 @@ def prepare_single_exercise_segments(
                     "response_timestamps": segment_feedback_timestamps,
                 }
             )
-
     return segments
 
+
+def prepare_sliding_window_segments(
+    record: dict,
+    feedback_spans: list[tuple[str, int, int]],
+    window_end_indices: list[int],
+    video_timestamps: list[float],
+) -> list[dict]:
+    """
+    Extract individual exercise segments by splitting workout videos based on transition feedbacks.
+
+    :param record:
+        Dictionary containing responses for the full workout.
+    :param feedback_spans:
+        List of (feedback, start index, end index) Tuples for each feedback.
+    :param window_end_indices:
+        End indices of each sliding window.
+    :param video_timestamps:
+        Timestamps of each video frame.
+
+    :return:
+        A list of dictionaries representing individual sliding window segments. Each dictionary
+        contains responses, response timestamps, and other relevant information
+        for each window.
+    """
+
+    feedback_timestamps = record["feedback_timestamps"]
+
+    segments = []
+    segment_feedbacks = []
+    segment_feedback_timestamps = []
+    window_idx = 0
+    timestamp_start_idxs = [0] + list(window_end_indices[:-1]-1) # -1 because end is exclusive
+    timestamp_start = video_timestamps[timestamp_start_idxs]
+    timestamp_end_idxs = list(window_end_indices[:-1]) + [len(video_timestamps)-1]
+    timestamp_end = video_timestamps[timestamp_end_idxs]
+    feedback_counter = 0
+    # Loop over all feedbacks and construct the dictionary for each window
+    for feedback in feedback_spans:
+        window_end_idx = window_end_indices[window_idx]
+        feedback_start_idx = feedback[1]
+        if feedback_start_idx >= window_end_idx:
+            # move to next window and create the dictionary for the window that just ended
+            # NOTE: because of the logic of this loop, the last window will not be created here,
+            # needs to be done after the loop
+            segments.append(
+                {
+                    "responses": segment_feedbacks,
+                    "response_timestamps": segment_feedback_timestamps,
+                    "exercise_start_timestamp": timestamp_start[window_idx],
+                    "exercise_end_timestamp": timestamp_end[window_idx],
+                }
+            )
+            segment_feedbacks = []
+            segment_feedback_timestamps = []
+            window_idx += 1
+        
+        segment_feedbacks.append(feedback[0])
+        segment_feedback_timestamps.append(feedback_timestamps[feedback_counter])
+        feedback_counter += 1
+
+    # add the last window
+    segments.append(
+        {
+            "responses": segment_feedbacks,
+            "response_timestamps": segment_feedback_timestamps,
+            "exercise_start_timestamp": timestamp_start[window_idx],
+            "exercise_end_timestamp": timestamp_end[window_idx],
+        }
+    )
+    return segments
 
 def extract_exercise_name(transition_feedback: str) -> str:
     """Extract exercise name from a transition feedback.
@@ -191,17 +262,24 @@ def single_exercise_system_prompt(exercise_name: str) -> str:
 def workout_system_prompt(exercises: list[str]) -> str:
     """System prompt for multi-exercise workouts."""
     return (
-        f"You are an expert fitness coaching AI guiding a user through a workout and "
-        f"coaching them as they exercise. You assess their performance, count repetitions, and "
-        f"proactively provide feedback.\n"
-        f"Guide the user through the following exercises: "
+        "You are an expert fitness coaching AI guiding a user through a workout and "
+        "coaching them as they exercise. You assess their performance, count repetitions, and "
+        "proactively provide feedback.\n"
+        "Guide the user through the following exercises: "
         f"{'; '.join([str(idx + 1) + ') ' + exercise for idx, exercise in enumerate(exercises)])}."
-        f"\nEach exercise should be done for 30 seconds."
+        "\nEach exercise should be done for 30 seconds."
     )
 
+def sliding_window_system_prompt() -> str:
+    """System prompt for sliding window workouts."""
+    return (
+        "You are an expert fitness coaching AI assisting a user with their workout and "
+        "coaching them as they exercise. You assess their performance, count repetitions, and "
+        "proactively provide feedback. Please also specify whenever you identify a transition between exercises.\n"
+    )
 
 def load_fit_coach_dataset(
-    data_root: str, split: str = "test", eval_mode: str = "single_exercise"
+    data_root: str, split: str = "test", eval_mode: str = "single_exercise", max_num_videos: int = None, shuffle_videos: bool = False, sliding_window_length: int = 20
 ) -> Dataset:
     """Loads the QEVD-FIT-Coach training or benchmark dataset.
 
@@ -213,7 +291,13 @@ def load_fit_coach_dataset(
     :param eval_mode:
         Mode to use for evaluation ("full_workout" or "single_exercise").
         Defaults to "single_exercises".
-
+    :param max_num_videos:
+        Maximum number of videos to load.
+    :param shuffle_videos:
+        Whether to shuffle the videos. This is for when max_num_videos is specified, so that we can sample a random subset of the videos
+        instead of loading the first max_num_videos videos. If max_num_videos is not specified, this is ignored.
+    :param sliding_window_length:
+        If using sliding window mode, this is the length of the sliding window in seconds.
     :return:
         A Hugging Face Datasets object.
     """
@@ -226,6 +310,13 @@ def load_fit_coach_dataset(
     with open(records_file, "r", encoding="utf-8") as f:
         workout_records = json.load(f)
 
+    if shuffle_videos:
+        random.shuffle(workout_records)
+
+    if max_num_videos is not None: 
+        workout_records = workout_records[:max_num_videos]
+
+
     # Create an empty dict to store processed records
     dataset = defaultdict(list)
 
@@ -237,9 +328,14 @@ def load_fit_coach_dataset(
         ]
 
         # Get feedback string and temporal span indices
-        feedback_spans = get_feedback_span(
-            orig_record["feedbacks"], orig_record["feedback_timestamps"]
-        )
+        try:
+            feedback_spans = get_feedback_span(
+                orig_record["feedbacks"], orig_record["feedback_timestamps"]
+            )
+        except AssertionError as e:
+            print(f"[WARNING]: Error processing record {orig_record['long_range_video_file']}: {e}")
+            continue
+            
 
         # Find transition feedback indices
         transition_indices = np.where(np.array(orig_record["is_transition"]))[0].tolist()
@@ -248,20 +344,43 @@ def load_fit_coach_dataset(
         exercises = [extract_exercise_name(feedback_spans[ii][0]) for ii in transition_indices][:-1]
 
         # Split workout videos into single exercise segments
-        if eval_mode == "single_exercise":
-            updated_records = prepare_single_exercise_segments(
-                orig_record, exercises, feedback_spans, transition_indices, data_dir
-            )
-
-        # Keep full workout
-        else:
-            updated_records = [
-                {
-                    "system": workout_system_prompt(exercises),
-                    "responses": [xx[0] for xx in feedback_spans],
-                    "response_timestamps": orig_record["feedback_timestamps"],
-                }
-            ]
+        match eval_mode:
+            case "single_exercise":
+                updated_records = prepare_single_exercise_segments(
+                    orig_record, exercises, feedback_spans, transition_indices, data_dir
+                )
+            case "full_workout":
+                updated_records = [
+                    {
+                        "system": workout_system_prompt(exercises),
+                        "responses": [xx[0] for xx in feedback_spans],
+                        "response_timestamps": orig_record["feedback_timestamps"],
+                    }
+                ]
+            case "full_workout_sliding_window":
+                # Very similar to single exercise mode, but instead of having one separate entry for each exercise,
+                # store it as a single entry for the entire workout
+                video_timestamps = load_video_timestamps(os.path.join(data_dir, orig_record["video_timestamps"]))
+                video_length = video_timestamps[-1] - video_timestamps[0]
+                n_frames = len(video_timestamps)
+                fps = n_frames / video_length
+                sliding_window_length_frames = int(sliding_window_length * fps) # must be an int so windows may not be exactly the desired duration, but will be close
+                num_windows = int(video_length // sliding_window_length) + 1# number of full-length windows, +1 to include last potentially shorter window
+                # end indices of each window, last index will probably be greater than n_frames, but that's okay because it's for the partial last window
+                window_end_indices = np.arange(1, num_windows+1) * sliding_window_length_frames
+                segments = prepare_sliding_window_segments(
+                    orig_record, feedback_spans, window_end_indices, video_timestamps
+                )
+                updated_records = [
+                    {
+                        "system": sliding_window_system_prompt(),
+                        "responses": [xx[0] for xx in feedback_spans],
+                        "response_timestamps": orig_record["feedback_timestamps"],
+                        "segments" : segments
+                    }
+                ]
+            case _:
+                raise ValueError(f"Invalid eval_mode: {eval_mode}")
 
         # Update dataset with processed segments
         update_dataset(dataset, updated_records, orig_record, data_dir)

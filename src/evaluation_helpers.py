@@ -7,7 +7,7 @@ from typing import Callable, Union
 from datasets import Dataset
 from torch import nn
 
-from src.evaluators import InteractiveFeedbackEvaluator
+from src.evaluators import InteractiveFeedbackEvaluator, VideoOnlyEvaluator
 from src.model_wrappers import BaseVLModelWrapper
 
 
@@ -16,10 +16,13 @@ def get_evaluator(evaluator_name: str) -> Callable:
     :return:
         An evaluator of type VisionLanguageEvaluator.
     """
-    if evaluator_name == "interactive_feedback_evaluator":
-        return InteractiveFeedbackEvaluator
-
-    raise NotImplementedError(f"Evaluator: {evaluator_name}, not found.")
+    match evaluator_name:
+        case "interactive_feedback_evaluator":
+            return InteractiveFeedbackEvaluator
+        case "video_only_evaluator":
+            return VideoOnlyEvaluator
+        case _:
+            raise NotImplementedError(f"Evaluator: {evaluator_name}, not found.")
 
 
 def evaluate_model(

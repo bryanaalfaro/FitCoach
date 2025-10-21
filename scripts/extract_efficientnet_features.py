@@ -187,11 +187,19 @@ def _process_video(filepath: str, fps_out: int = 16) -> np.ndarray:
     vidcap = cv2.VideoCapture(filepath)
     assert vidcap.isOpened()
 
-    video_ts = load_video_timestamps(filepath.replace(".mp4", "_timestamps.npy"))
+    if "QEVD" in filepath:
+        video_ts = load_video_timestamps(filepath.replace(".mp4", "_timestamps.npy"))
+    else:
+        video_ts = np.load(filepath.replace(".mp4", "_timestamps.npy"))
+
     video_ts_normalized = video_ts - video_ts[0]
 
-    file_idx = int(filepath.split("/")[-1].split(".")[0])
-
+    # This is only relevant for the QEVD dataset.
+    if "QEVD" in filepath:
+        file_idx = int(filepath.split("/")[-1].split(".")[0])
+    else:
+        file_idx = -1
+    
     index_in = -1
     features_ds = []
     features_timestamps = []
@@ -207,7 +215,7 @@ def _process_video(filepath: str, fps_out: int = 16) -> np.ndarray:
 
             # Ensure all videos are vertical
             frame = _resize(frame)
-            if file_idx <= 145:
+            if file_idx <= 145 and file_idx != -1:
                 frame = _rotate(frame)
 
             next_frame_timestamp += 1.0 / fps_out

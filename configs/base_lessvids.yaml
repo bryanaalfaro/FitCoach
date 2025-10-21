@@ -2,6 +2,7 @@ model:
     llama2_7b_path: './Llama-2-7b-hf'
     kwargs:
         checkpoint_path: './ckpts_streamvlm/ckpts_streamvlm/state_dict.pth.tar'
+        finetuned_path: './ckpts_full_workout/checkpoint_last.pt'
         strict_checkpoint: False
         bf16: True
         xattn_config:
@@ -33,6 +34,10 @@ datasets:
         kwargs:
             data_root: './data'
             split: 'train'
+            max_num_videos: 10
+            shuffle_videos: False
+            # eval_mode: 'full_workout'
+            eval_mode: 'full_workout_sliding_window'
 
 evaluator:
     name: 'interactive_feedback_evaluator'

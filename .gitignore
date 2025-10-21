@@ -6,3 +6,15 @@
 *.py[cod]
 *.cpython-36.pyc
 *.egg-info
+
+# Model weights
+*ckpts_efficientnet*
+*ckpts_streamvlm*
+*Llama-2-7b-hf*
+*.pt
+
+# Qualcomm QEVD dataset
+*QEVD*
+
+# Saved output
+*streamvlm_responses.json

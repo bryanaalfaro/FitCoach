@@ -5,6 +5,7 @@
 from typing import AnyStr
 
 import numpy as np
+import torch
 import torch.nn as nn
 from peft.peft_model import PeftModel, PeftModelForCausalLM
 from transformers import PreTrainedModel
@@ -41,3 +42,7 @@ def load_video_timestamps(file_path: AnyStr) -> np.array:
     timestamps = np.load(file_path).astype(np.double)
     timestamps = np.array([int(xx / 1e9) + (xx / 1e9) % 1 for xx in timestamps]) + 28800.0
     return timestamps
+
+def logits_to_text(logits: torch.Tensor, tokenizer):
+    tokens = torch.argmax(logits, dim=-1)
+    return tokenizer.batch_decode(tokens, skip_special_tokens=False)

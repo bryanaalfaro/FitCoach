@@ -16,7 +16,7 @@ from src.constants import (
     INFERENCE_SPEED,
     VISION_TOKEN,
 )
-from src.utils import get_vlm_lang_handler
+from src.utils import get_vlm_lang_handler, logits_to_text
 
 
 class BaseVLModelWrapper:
@@ -171,26 +171,42 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
             encoded_video = self.model.vision(video)
 
         # Adapt video features
-        multi_model_embedding = self.model.adapter(encoded_video, input_ids, vision_xattn_mask)
+        if not self.train_vision:
+            with torch.no_grad():
+                multi_model_embedding = self.model.adapter(encoded_video, input_ids, vision_xattn_mask)
+        else:
+            multi_model_embedding = self.model.adapter(encoded_video, input_ids, vision_xattn_mask)
 
         # Shift video features and input text tokens by 1 for training
         if attention_mask is None:
-            model_attention_mask = torch.zeros_like(input_ids[:, :-1]).int()
-            model_attention_mask[input_ids[:, :-1] != self.tokenizer.pad_token_id] = 1
-        else:
-            model_attention_mask = attention_mask[:, :-1]
+            attention_mask = torch.ones_like(input_ids).int()
+        # if attention_mask is None:
+        #     model_attention_mask = torch.zeros_like(input_ids[:, :-1]).int()
+        #     model_attention_mask[input_ids[:, :-1] != self.tokenizer.pad_token_id] = 1
+        # else:
+        #     breakpoint()
+        #     model_attention_mask = attention_mask[:, :-1]
 
-        for key, embedding in multi_model_embedding.items():
-            if (key in ["vision_xattn_mask", "language_timestamps"]) and embedding is not None:
-                multi_model_embedding[key] = multi_model_embedding[key][:, :-1]
-            elif isinstance(embedding, dict):
-                multi_model_embedding[key]["vision"] = embedding["vision"][:, 1:]
+        # for key, embedding in multi_model_embedding.items():
+        #     if (key in ["vision_xattn_mask", "language_timestamps", "text_tokens"]) and embedding is not None:
+        #         multi_model_embedding[key] = multi_model_embedding[key][:, :-1]
+        #     elif isinstance(embedding, dict) and "vision" in embedding.keys():
+        #         multi_model_embedding[key]["vision"] = embedding["vision"][:, :-1]
+        #     # for some reason there's this one
+        #     elif isinstance(embedding, dict) and "comb" in embedding.keys():
+        #         multi_model_embedding[key]["comb"] = embedding["comb"][:, :-1]
 
         # Forward pass through the model
-        lang_out = self.model.lang(
-            inputs_embeds=multi_model_embedding, attention_mask=model_attention_mask
-        )
-
+        labels = kwargs.get("target_ids", None) # If not none will give loss as well.
+        if not self.train_llm:
+            with torch.no_grad():
+                lang_out = self.model.lang(
+                    inputs_embeds=multi_model_embedding, attention_mask=attention_mask, labels=labels
+                )
+        else:
+            lang_out = self.model.lang(
+                inputs_embeds=multi_model_embedding, attention_mask=attention_mask, labels=labels
+            )
         return lang_out
 
     @torch.no_grad()
@@ -203,6 +219,8 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
         max_feedback_length: int,
         do_sample: bool,
         temperature: float,
+        return_logits: bool = False,
+        return_np: bool = True,
         **kwargs
     ) -> torch.tensor:
         """Interactively generate feedback until the end of the input video.
@@ -227,7 +245,7 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
             List of output tokens.
         """
         assert vision_xattn_mask is not None
-        output_ids = input_ids.clone()
+        output_ids = input_ids.clone() # This means we're not forcing a prediciton of the prompt at the beginning
 
         input_vision_idx = kwargs.get("input_vision_idx", 2)  # number of initial input frames
         skip_blind_frames = [False] * (
@@ -239,6 +257,10 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
         curr_response_len = 0
         feedback_mode = False
         # Continue generating until end of video
+        logits = torch.zeros(input_ids.shape[0], 0, self.model.lang.config.vocab_size).to(self.device)
+
+        # breakpoint()
+
         while input_vision_idx < encoded_video["feats"].shape[1]:
             # Prepare video input
             encoded_video_feats = (
@@ -253,7 +275,6 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
                 ],
                 "spatial_res": encoded_video_spatial_res,
             }
-
             # Adapt video features
             multi_model_embedding = self.model.adapter(
                 encoded_video_in_range, output_ids, vision_xattn_mask
@@ -272,9 +293,11 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
 
             # Sample next token
             if not do_sample:  # Greedy decoding
+                logits = torch.cat([logits, lang_out["logits"][:, -1][:, None]], dim=1)
                 lang_out_logits = torch.argmax(lang_out["logits"], dim=-1)
                 output_ids = torch.cat([output_ids, lang_out_logits[:, -1][:, None]], dim=1)
             else:  # Temperature based samping
+                logits = torch.cat([logits, lang_out["logits"][:, -1][:, None]], dim=1)
                 lang_out_logits = lang_out["logits"][:, -1]
                 scaled_logits = lang_out_logits / temperature
                 probs = torch.softmax(scaled_logits, dim=-1)
@@ -327,9 +350,19 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
                 vision_xattn_mask_pad = torch.zeros(input_ids.shape[0], 1)
                 vision_xattn_mask_pad = vision_xattn_mask_pad.to(vision_xattn_mask)
                 vision_xattn_mask = torch.cat([vision_xattn_mask, vision_xattn_mask_pad], dim=1)
+        # output_ids = output_ids.cpu().numpy()
 
-        output_ids = output_ids.cpu().numpy()
-        return output_ids
+        # Test a single forward pass (once the xattn mask is fully built)
+        # print('fwd pass')
+        # import time; time.sleep(3)
+        # og_video = kwargs.get("og_video", None)
+        # vision_xattn_mask = 
+        # lang_out = self.forward(og_video, output_ids, vision_xattn_mask, attention_mask=None, target_ids=output_ids)
+        # print(f'INFO: single forward pass logits:\n{logits_to_text(lang_out["logits"], self.tokenizer)}')
+
+        if return_logits:
+            return logits.cpu().numpy() if return_np else logits
+        return output_ids.cpu().numpy() if return_np else output_ids
 
     def to_torch_tensor_for_generation(self, t: Union[np.ndarray, list]) -> torch.tensor:
         """
@@ -357,12 +390,14 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
             Boolean tensor indicating where cross attention should be applied. The number of
             locations set to True should be of the same length as video.
         """
-        assert len(video.shape) == 4
+        assert len(video.shape) == 4 or (len(video.shape) == 5 and isinstance(video, torch.Tensor))
+
+        # breakpoint()
 
         video, vision_xattn_mask, input_prompt = map(
             lambda t: self.to_torch_tensor_for_generation(t),
             [video, vision_xattn_mask, input_prompt],
         )
-
+        # breakpoint()
         encoded_video = self.model.vision(video)
-        return self._generate_interactive(encoded_video, input_prompt, vision_xattn_mask, **kwargs)
+        return self._generate_interactive(encoded_video, input_prompt, vision_xattn_mask, og_video=video, **kwargs)
