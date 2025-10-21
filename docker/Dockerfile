@@ -1,5 +1,5 @@
 
-FROM docker.io/library/pytorch/pytorch:2.0.0-cuda11.7-cudnn8-runtime
+FROM pytorch/pytorch:2.0.0-cuda11.7-cudnn8-runtime
 
 RUN apt update && \
     apt-get install --yes apt-utils && \
@@ -31,7 +31,7 @@ RUN conda update -n base -c defaults conda && \
 # base conda installations
 RUN conda install -c conda-forge wheel setuptools==69.5.1 packaging pytest-console-scripts mpi4py
 RUN conda install pytorch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 pytorch-cuda=11.7 -c pytorch -c nvidia
-
+RUN pip install pyarrow==14.0.1
 # base pip installations
 COPY docker/requirements-pip.txt requirements-pip.txt
 RUN pip install --no-cache-dir --upgrade -r requirements-pip.txt
