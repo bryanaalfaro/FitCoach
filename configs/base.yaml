@@ -1,7 +1,7 @@
 model:
-    llama2_7b_path: './ckpts_llama2/7B-FT/'
+    llama2_7b_path: './Llama-2-7b-hf'
     kwargs:
-        checkpoint_path: './ckpts_streamvlm/state_dict.pth.tar'
+        checkpoint_path: './ckpts_streamvlm/ckpts_streamvlm/state_dict.pth.tar'
         strict_checkpoint: False
         bf16: True
         xattn_config:

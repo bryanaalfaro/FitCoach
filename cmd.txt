@@ -1,0 +1,1 @@
+docker run --name fitcoach -it -v .:/project balfar0/cis6800
