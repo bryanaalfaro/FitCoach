@@ -12,6 +12,7 @@ import numpy as np
 from datasets import Dataset
 from torch import nn
 from tqdm import tqdm
+import cv2
 
 from src.constants import (
     FEEDBACK_BEGIN_TOKEN,
@@ -407,6 +408,21 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
         with open(save_path, "w", encoding="utf-8") as f:
             json.dump(save_dict_list, f)
 
+    @staticmethod
+    def _convert_timestamp_to_human_readable(timestamp: float) -> str:
+        """
+        Convert a timestamp to a human readable string. Used for clarity when extracting the video snippet being evaluated.
+
+        :param timestamp:
+            Timestamp to convert.
+
+        :return:
+            Human readable string.
+        """
+        time_minutes = int(timestamp // 60)
+        time_seconds = int(timestamp % 60)
+        return f"{time_minutes}:{time_seconds:02d}"
+
     def _print_eval_summary(
         self,
         gt_feedbacks: list[str],
@@ -472,7 +488,7 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
         matched_feedbacks_to_save = []
 
         eval_idxs = list(range(0, len(self.dataset)))
-        random.shuffle(eval_idxs)
+        # random.shuffle(eval_idxs) # For debugging can turn off
         tqdm.write("Starting evaluation ... ")
         self.model.eval()
         for it in tqdm(eval_idxs):
@@ -487,6 +503,19 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
 
             video = np.load(feat_path)
             video_timestamps = np.load(data["efficientnet_timestamps_path"])
+
+            # The actual video files are at a different fps than the feature timestamps, so we need to be able 
+            # to sync the two up when visualizing feedback on the actual video.
+            real_vid = cv2.VideoCapture(data['video_path'])
+            real_vid_fps = real_vid.get(cv2.CAP_PROP_FPS)
+            real_vid_frames = real_vid.get(cv2.CAP_PROP_FRAME_COUNT)
+            real_vid_duration_seconds = real_vid_frames / real_vid_fps
+            feature_duration_seconds = video_timestamps[-1] - video_timestamps[0]
+            ratio = real_vid_duration_seconds / feature_duration_seconds
+            real_vid.release()
+            real_start = self._convert_timestamp_to_human_readable(ratio*(episode_start_timestamp - video_timestamps[0]))
+            real_end = self._convert_timestamp_to_human_readable(ratio*(episode_end_timestamp - video_timestamps[0]))
+            print(f"Getting video features from {feat_path}: {real_start} to {real_end}")
 
             video = self._get_video_for_episode(
                 video, video_timestamps, episode_start_timestamp, episode_end_timestamp

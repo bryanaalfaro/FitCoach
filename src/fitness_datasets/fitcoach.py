@@ -126,6 +126,7 @@ def prepare_single_exercise_segments(
     """
     # Load video timestamps
     video_timestamps = load_video_timestamps(os.path.join(data_dir, record["video_timestamps"]))
+    print(f"Video timestamps file: {os.path.join(data_dir, record['video_timestamps'])}")
     feedback_timestamps = record["feedback_timestamps"]
 
     segments = []

@@ -93,7 +93,7 @@ def _register_features_hook() -> Dict:
 
         return hook
 
-    model.net.module[0].cnn[31][0].register_forward_hook(get_features("last_conv_before_relu"))
+    model.net._modules['0'].cnn[31][0].register_forward_hook(get_features("last_conv_before_relu"))
 
     return _features
 
