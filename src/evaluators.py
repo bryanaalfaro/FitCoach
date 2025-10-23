@@ -574,3 +574,178 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
 
         # Save feedbacks
         self._dump_pred_feedbacks(matched_feedbacks_to_save, self.feedbacks_save_path)
+
+class VideoOnlyEvaluator(VisionLanguageEvaluator):
+    """
+    Evaluator class for datasets that do not contain ground truth feedbacks. Useful for 
+    testing predicted feedbacks on custom videos. Does not save feedbacks to a file.
+    """
+    def __init__(self, model: BaseVLModelWrapper, dataset: Dataset, **kwargs) -> None:
+        """
+        :param model:
+            Model to be evaluated
+        :param dataset:
+            Test dataset
+        """
+        super().__init__(model, dataset)
+    
+    def _extract_pred_feedbacks(
+        self, output: list[int], feats_frequency: int
+    ) -> tuple[list[str], Any]:
+        """
+        :param output:
+            List of output tokens from the model.
+        :param feats_frequency:
+            Number of input features per second.
+
+        :return:
+            Predicted feedback strings and their timestamps.
+        """
+        responses = []
+        timestamps = []
+
+        # Consider the output after the input prompt
+        first_vision_token = np.where(output == self.model.special_tokens_dict[VISION_TOKEN])[0][0]
+        output = output[first_vision_token:]
+
+        # Get feedback indices
+        feedback_begin_idxs = np.where(
+            output == self.model.special_tokens_dict[FEEDBACK_BEGIN_TOKEN]
+        )[0]
+        feedback_end_idxs = np.where(output == self.model.special_tokens_dict[FEEDBACK_END_TOKEN])[
+            0
+        ]
+
+        # Extract the feedback strings and timestamps.
+        previous_answer_generation_time = 0
+        for idx in range(min(len(feedback_begin_idxs), len(feedback_end_idxs))):
+            answer_begin_idx = feedback_begin_idxs[idx]
+            answer_end_idx = feedback_end_idxs[idx]
+
+            if idx > 0:
+                previous_answer_end_idx = feedback_end_idxs[idx - 1]
+            else:
+                previous_answer_end_idx = 1
+
+            response = self.model.tokenizer.decode(output[answer_begin_idx + 1 : answer_end_idx])
+
+            # Ignore empty responses
+            if len(response) > 0:
+                responses.append(response)
+
+                timestep = answer_begin_idx - previous_answer_end_idx - 1
+                timestep /= feats_frequency
+                timestep += previous_answer_generation_time
+                timestamps.append(timestep)
+
+                previous_answer_generation_time = answer_end_idx - answer_begin_idx
+                previous_answer_generation_time /= INFERENCE_SPEED
+            else:
+                previous_answer_generation_time = 0
+
+        return responses, np.cumsum(timestamps).tolist()
+
+    
+    def _print_eval_summary(
+        self,
+        pred_feedbacks: list[str],
+        pred_feedback_timestamps: list[float],
+    ) -> None:
+        """
+        :param pred_feedbacks:
+            List of predicted feedbacks.
+        :param pred_feedback_timestamps:
+            List of predicted feedback timestamps.
+        """
+        tqdm.write("=" * 40)
+        tqdm.write("-" * 40)
+        tqdm.write("Pred Timestamp => Pred Feedback")
+        for pred_feedback, pred_feedback_timestep in zip(pred_feedbacks, pred_feedback_timestamps):
+            tqdm.write(f"{pred_feedback_timestep:.2f} => {pred_feedback}")
+        tqdm.write("-" * 40)
+
+    def __call__(self, **sampling_kwargs):
+        """
+        :param sampling_kwargs:
+            Kwargs to be passed on to the model generate method.
+        """
+        feats_frequency = sampling_kwargs.get("feats_frequency", 4)
+        # meteor_scores, bert_scores, rouge_scores = [], [], []
+        # t_f_score_running_stats = {
+        #     "total_num_gt_feedbacks": 0,
+        #     "total_num_pred_feedbacks": 0,
+        #     "total_matched_gt_feedbacks": 0,
+        #     "total_matched_pred_feedbacks": 0,
+        # }
+
+        eval_idxs = list(range(0, len(self.dataset)))
+        # random.shuffle(eval_idxs) # For debugging can turn off
+        tqdm.write("Starting evaluation ... ")
+        self.model.eval()
+        for it in tqdm(eval_idxs):
+            # Load data
+            data = self.dataset[it]
+            feat_path = data["efficientnet_features_path"]
+            system_prompt = data["system"]
+
+            video = np.load(feat_path)
+            video_timestamps = np.load(data["efficientnet_timestamps_path"])
+
+            # The actual video files are at a different fps than the feature timestamps, so we need to be able 
+            # to sync the two up when visualizing feedback on the actual video.
+            # real_vid = cv2.VideoCapture(data['video_path'])
+            # real_vid_fps = real_vid.get(cv2.CAP_PROP_FPS)
+            # real_vid_frames = real_vid.get(cv2.CAP_PROP_FRAME_COUNT)
+            # real_vid_duration_seconds = real_vid_frames / real_vid_fps
+            # feature_duration_seconds = video_timestamps[-1] - video_timestamps[0]
+            # ratio = real_vid_duration_seconds / feature_duration_seconds
+            # real_vid.release()
+            # real_start = self._convert_timestamp_to_human_readable(ratio*(episode_start_timestamp - video_timestamps[0]))
+            # real_end = self._convert_timestamp_to_human_readable(ratio*(episode_end_timestamp - video_timestamps[0]))
+            print(f"Evaluating video {data['video_path']}")
+
+            # video = self._get_video_for_episode(
+            #     video, video_timestamps, episode_start_timestamp, episode_end_timestamp
+            # )
+
+            # Prepare inputs to the model
+            input_prompt = system_prompt + VISION_TOKEN
+            input_prompt = self.model.tokenizer.encode(input_prompt)
+            vision_xattn_mask = self._get_vision_xattn_mask(input_prompt)
+            vision_xattn_mask = [2 if tok == 1 else 0 for tok in vision_xattn_mask]
+
+            # Generate Feedbacks
+            out = self.model.generate(
+                input_prompt=input_prompt,
+                video=video,
+                vision_xattn_mask=vision_xattn_mask,
+                **sampling_kwargs,
+            )
+
+            # Process feedbacks
+            pred_feedbacks, pred_feedback_timestamps = self._extract_pred_feedbacks(
+                out[0], feats_frequency
+            )
+            # gt_feedback_timestamps = self._normalize_response_timestamps(
+            #     gt_feedback_timestamps, episode_start_timestamp
+            # )
+
+            # # Compute metrics
+            # t_f_score, matched_feedbacks, t_f_score_running_stats = self._compute_temporal_fscore(
+            #     gt_feedbacks,
+            #     pred_feedbacks,
+            #     gt_feedback_timestamps,
+            #     pred_feedback_timestamps,
+            #     t_f_score_running_stats,
+            # )
+
+            # rouge_scores += self._compute_rouge_scores(matched_feedbacks)
+            # meteor_scores += self._compute_meteor_scores(matched_feedbacks)
+            # if self.bert_score is not None:
+            #     bert_scores += self._compute_bert_scores(matched_feedbacks)
+
+            # Print a running summary of metrics
+            self._print_eval_summary(
+                pred_feedbacks,
+                pred_feedback_timestamps,
+            )

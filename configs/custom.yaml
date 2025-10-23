@@ -35,7 +35,7 @@ datasets:
             split: 'test'
 
 evaluator:
-    name: 'interactive_feedback_evaluator'
+    name: 'video_only_evaluator'
     kwargs:
         feedbacks_save_folder: './saved_feedbacks/'
         feedbacks_save_file_name: 'streamvlm_responses'
