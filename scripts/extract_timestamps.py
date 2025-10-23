@@ -26,6 +26,7 @@ def load_video_timestamps(file_path: str) -> np.array:
     assert vid.isOpened()
     fps = vid.get(cv2.CAP_PROP_FPS)
     frame_count = vid.get(cv2.CAP_PROP_FRAME_COUNT)
+    vid.release()
     return np.arange(0, frame_count) / fps
 
 def extract_timestamps(data_dir: str) -> None:

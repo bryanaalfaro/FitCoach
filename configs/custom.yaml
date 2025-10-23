@@ -1,0 +1,46 @@
+model:
+    llama2_7b_path: './Llama-2-7b-hf'
+    kwargs:
+        checkpoint_path: './ckpts_streamvlm/ckpts_streamvlm/state_dict.pth.tar'
+        strict_checkpoint: False
+        bf16: True
+        xattn_config:
+            xattn_type: 'dotprod'
+            xattn_block_size: 1
+            adapter_insert_layers: "[6, 8, 10, 12, 14, 16, 18, 20, 22]"
+            num_of_xattn_heads: 1
+        trainable:
+            llm: False
+            xattn: False
+            vision: False
+        peft_config:
+            r: 32
+            lora_alpha: 16
+            lora_dropout: 0.05
+            target_modules:
+                - 'q_proj'
+                - 'v_proj'
+                - 'k_proj'
+                - 'lm_head'
+
+datasets:
+    test:
+        name: 'custom-dataset'
+        relevant_column: 'query'  # 'class'
+        use_tokenized_data_only: False
+        skip_tokenization: True
+        force_collate: True
+        kwargs:
+            data_root: './data/custom_videos'
+            split: 'test'
+
+evaluator:
+    name: 'interactive_feedback_evaluator'
+    kwargs:
+        feedbacks_save_folder: './saved_feedbacks/'
+        feedbacks_save_file_name: 'streamvlm_responses'
+    sampling_kwargs:
+        do_sample: False # Greedy decoding
+        temperature: 0. # Ignored
+        max_feedback_length: 128
+        feats_frequency: 4 # num of features per second
