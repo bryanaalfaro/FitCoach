@@ -498,11 +498,17 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
             system_prompt = data["system"]
             gt_feedbacks = data["responses"]
             gt_feedback_timestamps = data["response_timestamps"]
-            episode_start_timestamp = data["exercise_start_timestamp"]
-            episode_end_timestamp = data["exercise_end_timestamp"]
 
             video = np.load(feat_path)
             video_timestamps = np.load(data["efficientnet_timestamps_path"])
+
+            # Bug in orginal code: these do not exist if in full workout evaluation mode
+            try:
+                episode_start_timestamp = data["exercise_start_timestamp"]
+                episode_end_timestamp = data["exercise_end_timestamp"]
+            except KeyError:
+                episode_start_timestamp = video_timestamps[0]-1e-12
+                episode_end_timestamp = video_timestamps[-1]+1e-12 
 
             # The actual video files are at a different fps than the feature timestamps, so we need to be able 
             # to sync the two up when visualizing feedback on the actual video.

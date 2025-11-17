@@ -6,7 +6,7 @@ import json
 import os
 from collections import defaultdict
 from typing import Any
-
+import random
 import numpy as np
 from datasets import Dataset
 from tqdm import tqdm
@@ -202,7 +202,7 @@ def workout_system_prompt(exercises: list[str]) -> str:
 
 
 def load_fit_coach_dataset(
-    data_root: str, split: str = "test", eval_mode: str = "single_exercise"
+    data_root: str, split: str = "test", eval_mode: str = "single_exercise", max_num_videos: int = None, shuffle_videos: bool = False
 ) -> Dataset:
     """Loads the QEVD-FIT-Coach training or benchmark dataset.
 
@@ -214,7 +214,11 @@ def load_fit_coach_dataset(
     :param eval_mode:
         Mode to use for evaluation ("full_workout" or "single_exercise").
         Defaults to "single_exercises".
-
+    :param max_num_videos:
+        Maximum number of videos to load.
+    :param shuffle_videos:
+        Whether to shuffle the videos. This is for when max_num_videos is specified, so that we can sample a random subset of the videos
+        instead of loading the first max_num_videos videos. If max_num_videos is not specified, this is ignored.
     :return:
         A Hugging Face Datasets object.
     """
@@ -226,6 +230,12 @@ def load_fit_coach_dataset(
     records_file = os.path.join(data_dir, "feedbacks_long_range.json")
     with open(records_file, "r", encoding="utf-8") as f:
         workout_records = json.load(f)
+
+    if max_num_videos is not None:
+        if shuffle_videos:
+            random.shuffle(workout_records)
+        workout_records = workout_records[:max_num_videos]
+
 
     # Create an empty dict to store processed records
     dataset = defaultdict(list)
