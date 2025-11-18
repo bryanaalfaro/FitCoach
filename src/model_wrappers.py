@@ -183,8 +183,11 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
         for key, embedding in multi_model_embedding.items():
             if (key in ["vision_xattn_mask", "language_timestamps"]) and embedding is not None:
                 multi_model_embedding[key] = multi_model_embedding[key][:, :-1]
-            elif isinstance(embedding, dict):
+            elif isinstance(embedding, dict): #and "vision" in embedding.keys():
                 multi_model_embedding[key]["vision"] = embedding["vision"][:, 1:]
+            # for some reason there's this one
+            # elif isinstance(embedding, dict) and "comb" in embedding.keys():
+            #     multi_model_embedding[key]["comb"] = embedding["comb"][:, 1:]
 
         # Forward pass through the model
         lang_out = self.model.lang(

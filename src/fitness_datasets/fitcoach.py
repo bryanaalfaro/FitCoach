@@ -58,7 +58,7 @@ def get_feedback_span(
 
     assert len(feedback_spans) == len(
         feedback_timestamps
-    ), "The number of feedbacks must equal the number of timestamps."
+    ), f"The number of feedbacks {len(feedbacks)} must equal the number of timestamps {len(feedback_timestamps)}."
 
     return feedback_spans
 
@@ -248,9 +248,14 @@ def load_fit_coach_dataset(
         ]
 
         # Get feedback string and temporal span indices
-        feedback_spans = get_feedback_span(
-            orig_record["feedbacks"], orig_record["feedback_timestamps"]
-        )
+        try:
+            feedback_spans = get_feedback_span(
+                orig_record["feedbacks"], orig_record["feedback_timestamps"]
+            )
+        except AssertionError as e:
+            print(f"[WARNING]: Error processing record {orig_record['long_range_video_file']}: {e}")
+            continue
+            
 
         # Find transition feedback indices
         transition_indices = np.where(np.array(orig_record["is_transition"]))[0].tolist()
