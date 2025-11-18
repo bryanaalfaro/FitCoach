@@ -1,0 +1,47 @@
+model:
+    llama2_7b_path: './Llama-2-7b-hf'
+    kwargs:
+        checkpoint_path: './ckpts_streamvlm/ckpts_streamvlm/state_dict.pth.tar'
+        strict_checkpoint: False
+        bf16: True
+        xattn_config:
+            xattn_type: 'dotprod'
+            xattn_block_size: 1
+            adapter_insert_layers: "[6, 8, 10, 12, 14, 16, 18, 20, 22]"
+            num_of_xattn_heads: 1
+        trainable:
+            llm: True
+            xattn: False
+            vision: False
+        peft_config:
+            r: 32
+            lora_alpha: 16
+            lora_dropout: 0.05
+            target_modules:
+                - 'q_proj'
+                - 'v_proj'
+                - 'k_proj'
+                - 'lm_head'
+
+datasets:
+    train:
+        name: 'fitcoach-dataset'
+        kwargs:
+            data_root: './data'
+            split: 'train'
+            eval_mode: 'full_workout'
+
+training:
+    output_dir: './ckpts_full_workout'
+    batch_size: 1
+    num_epochs: 1
+    max_steps:
+    lr: 5.0e-6
+    weight_decay: 0.01
+    gradient_accumulation_steps: 1
+    max_grad_norm: 1.0
+    num_workers: 0
+    log_every: 10
+    save_every: 500
+    max_sequence_length: 4096
+
