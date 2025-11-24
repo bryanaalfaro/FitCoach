@@ -32,7 +32,7 @@ datasets:
         force_collate: True
         kwargs:
             data_root: './data'
-            split: 'test'
+            split: 'train'
             max_num_videos: 10
             shuffle_videos: False
             eval_mode: 'full_workout'

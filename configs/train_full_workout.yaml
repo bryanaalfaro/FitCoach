@@ -45,3 +45,10 @@ training:
     save_every: 500
     max_sequence_length: 4096
 
+
+evaluator:
+    sampling_kwargs:
+        do_sample: False # Greedy decoding
+        temperature: 0. # Ignored
+        max_feedback_length: 128
+        feats_frequency: 4 # num of features per second

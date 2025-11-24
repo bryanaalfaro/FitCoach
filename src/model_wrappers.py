@@ -206,6 +206,8 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
         max_feedback_length: int,
         do_sample: bool,
         temperature: float,
+        return_logits: bool = False,
+        return_np: bool = True,
         **kwargs
     ) -> torch.tensor:
         """Interactively generate feedback until the end of the input video.
@@ -230,7 +232,7 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
             List of output tokens.
         """
         assert vision_xattn_mask is not None
-        output_ids = input_ids.clone()
+        output_ids = input_ids.clone() # This means we're not forcing a prediciton of the prompt at the beginning
 
         input_vision_idx = kwargs.get("input_vision_idx", 2)  # number of initial input frames
         skip_blind_frames = [False] * (
@@ -242,6 +244,7 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
         curr_response_len = 0
         feedback_mode = False
         # Continue generating until end of video
+        logits = torch.zeros(input_ids.shape[0], 0, self.model.lang.config.vocab_size).to(self.device)
         while input_vision_idx < encoded_video["feats"].shape[1]:
             # Prepare video input
             encoded_video_feats = (
@@ -261,6 +264,7 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
             multi_model_embedding = self.model.adapter(
                 encoded_video_in_range, output_ids, vision_xattn_mask
             )
+            # breakpoint()
 
             # Generate next token logits
             lang_out = self.model.lang(
@@ -275,9 +279,11 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
 
             # Sample next token
             if not do_sample:  # Greedy decoding
+                logits = torch.cat([logits, lang_out["logits"][:, -1][:, None]], dim=1)
                 lang_out_logits = torch.argmax(lang_out["logits"], dim=-1)
                 output_ids = torch.cat([output_ids, lang_out_logits[:, -1][:, None]], dim=1)
             else:  # Temperature based samping
+                logits = torch.cat([logits, lang_out["logits"][:, -1][:, None]], dim=1)
                 lang_out_logits = lang_out["logits"][:, -1]
                 scaled_logits = lang_out_logits / temperature
                 probs = torch.softmax(scaled_logits, dim=-1)
@@ -330,9 +336,10 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
                 vision_xattn_mask_pad = torch.zeros(input_ids.shape[0], 1)
                 vision_xattn_mask_pad = vision_xattn_mask_pad.to(vision_xattn_mask)
                 vision_xattn_mask = torch.cat([vision_xattn_mask, vision_xattn_mask_pad], dim=1)
-
-        output_ids = output_ids.cpu().numpy()
-        return output_ids
+        # output_ids = output_ids.cpu().numpy()
+        if return_logits:
+            return logits.cpu().numpy() if return_np else logits
+        return output_ids.cpu().numpy() if return_np else output_ids
 
     def to_torch_tensor_for_generation(self, t: Union[np.ndarray, list]) -> torch.tensor:
         """
@@ -360,12 +367,14 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
             Boolean tensor indicating where cross attention should be applied. The number of
             locations set to True should be of the same length as video.
         """
-        assert len(video.shape) == 4
+        assert len(video.shape) == 4 or (len(video.shape) == 5 and isinstance(video, torch.Tensor))
+
+        # breakpoint()
 
         video, vision_xattn_mask, input_prompt = map(
             lambda t: self.to_torch_tensor_for_generation(t),
             [video, vision_xattn_mask, input_prompt],
         )
-
+        # breakpoint()
         encoded_video = self.model.vision(video)
         return self._generate_interactive(encoded_video, input_prompt, vision_xattn_mask, **kwargs)

@@ -26,6 +26,7 @@ from src.constants import (
 )
 from src.fitness_datasets import load_dataset
 from src.model_helpers import make_model
+from src.evaluators import TrainingEvaluator
 
 IGNORE_INDEX = -100
 
@@ -152,7 +153,7 @@ def build_streaming_sequence(
         loss_mask=loss_mask,
     )
 
-
+# I don't really think these next 2 class are necessary, but I'm keeping them for now
 class FullWorkoutTrainingDataset(Dataset):
     """Lazily loads EfficientNet features + transcripts for training."""
 
@@ -199,6 +200,7 @@ class FullWorkoutTrainingDataset(Dataset):
             "attention_mask": np.array(seq.attention_mask, dtype=np.int64),
             "vision_xattn_mask": np.array(seq.vision_xattn_mask, dtype=np.int64),
             "loss_mask": np.array(seq.loss_mask, dtype=np.int64),
+            "system_prompt": record["system"],
         }
 
 
@@ -223,6 +225,7 @@ class FullWorkoutCollator:
             "attention_mask": torch.from_numpy(sample["attention_mask"]).unsqueeze(0),
             "vision_xattn_mask": torch.from_numpy(sample["vision_xattn_mask"]).unsqueeze(0),
             "loss_mask": torch.from_numpy(sample["loss_mask"]).unsqueeze(0),
+            "system_prompt": sample["system_prompt"],
         }
         return out
 
@@ -246,17 +249,28 @@ def load_checkpoint(model_wrapper, optimizer, ckpt_path: str) -> tuple[int, int]
 
 
 def compute_loss(
-    logits: torch.Tensor,
-    input_ids: torch.Tensor,
-    loss_mask: torch.Tensor,
+    logits: torch.Tensor, # does not include the prompt
+    input_ids: torch.Tensor, # includes the prompt and already is written as the most likely token, need to create logits
+    tokenized_prompt: torch.Tensor,
 ) -> torch.Tensor:
-    shift_logits = logits.reshape(-1, logits.size(-1))
-    shift_labels = input_ids[:, 1:].contiguous().view(-1)
-    shift_loss_mask = loss_mask[:, 1:].contiguous().view(-1)
+    ignore_beginning = len(tokenized_prompt)
+    # remove the prompt from the outputs and inputs
+    # logits = logits[:, ignore_beginning:].contiguous()
+    input_ids = input_ids[:, ignore_beginning:]
+    input_logits = torch.zeros(*logits.shape, input_ids.shape[-1], device=logits.device)
+    input_logits[..., input_ids] = 1.0
 
-    targets = shift_labels.clone()
-    targets[shift_loss_mask == 0] = IGNORE_INDEX
-    return F.cross_entropy(shift_logits, targets, ignore_index=IGNORE_INDEX)
+
+    breakpoint()
+
+    # padding
+    max_length = max(logits.size(1), input_ids.size(1))
+    logits = F.pad(logits, (0, 0, 0, max_length - logits.size(1)), value=IGNORE_INDEX)
+    input_ids = F.pad(input_ids, (0, 0,0, max_length - input_ids.size(1)), value=IGNORE_INDEX)
+    breakpoint()
+    # compute the loss
+    loss = F.cross_entropy(input_logits, input_ids, ignore_index=IGNORE_INDEX)
+    return loss
 
 
 def train() -> None:
@@ -316,6 +330,8 @@ def train() -> None:
     device = model.device
     model_dtype = next(model.model.lang.parameters()).dtype
 
+    helper_evaluator = TrainingEvaluator(model)
+
     optimizer.zero_grad(set_to_none=True)
     running_loss = 0.0
     samples_seen = 0
@@ -327,24 +343,25 @@ def train() -> None:
         progress_total = max_epochs * steps_per_epoch
     progress = tqdm(total=progress_total, desc="Training")
     micro_step = 0
+    sampling_kwargs = config["evaluator"]["sampling_kwargs"]
     for epoch in range(start_epoch, max_epochs):
-        for batch in dataloader:
+        for i, batch in enumerate(dataloader):
             batch_size = batch["input_ids"].size(0)
             samples_seen += batch_size
 
-            video = batch["video"].to(device=device, dtype=model_dtype, non_blocking=True)
+            video = batch["video"].to(device=device, dtype=model_dtype, non_blocking=True).squeeze(0)
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             vision_xattn_mask = batch["vision_xattn_mask"].to(device, non_blocking=True)
             loss_mask = batch["loss_mask"].to(device, non_blocking=True)
+            system_prompt = batch["system_prompt"]
 
-            outputs = model(
-                video=video,
-                input_ids=input_ids,
-                vision_xattn_mask=vision_xattn_mask,
-                attention_mask=attention_mask,
-            )
-            loss = compute_loss(outputs["logits"], input_ids, loss_mask)
+            lang_out = helper_evaluator(video, system_prompt, return_logits=True, **sampling_kwargs)
+            # breakpoint()
+            lang_out = torch.as_tensor(lang_out).to(device)
+            tokenized_prompt = torch.as_tensor(model.tokenizer.encode(system_prompt))
+            # breakpoint()
+            loss = compute_loss(lang_out, input_ids, tokenized_prompt)
             loss = loss / grad_accum
             loss.backward()
 

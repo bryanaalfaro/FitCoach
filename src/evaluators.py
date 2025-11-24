@@ -10,7 +10,7 @@ from typing import Any, List, Optional, Tuple, Union
 import evaluate
 import numpy as np
 from datasets import Dataset
-from torch import nn
+from torch import nn, Tensor
 from tqdm import tqdm
 import cv2
 
@@ -526,6 +526,7 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
             video = self._get_video_for_episode(
                 video, video_timestamps, episode_start_timestamp, episode_end_timestamp
             )
+            # breakpoint()
 
             # Prepare inputs to the model
             input_prompt = system_prompt + VISION_TOKEN
@@ -533,7 +534,7 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
             vision_xattn_mask = self._get_vision_xattn_mask(input_prompt)
             vision_xattn_mask = [2 if tok == 1 else 0 for tok in vision_xattn_mask]
 
-            # Generate Feedbacks
+            # Generate Feedback
             out = self.model.generate(
                 input_prompt=input_prompt,
                 video=video,
@@ -755,3 +756,38 @@ class VideoOnlyEvaluator(VisionLanguageEvaluator):
                 pred_feedbacks,
                 pred_feedback_timestamps,
             )
+
+class TrainingEvaluator(InteractiveFeedbackEvaluator):
+    """
+    Utility class for getting model output tokens during training. The InteractiveFeedbackEvaluator contains
+    many useful functions for extracting feedbacks, which we can use here and is the motivation for this class.
+    """
+
+    def __init__(self, model: BaseVLModelWrapper):
+        # Won't actually save feedbacks but needed as init argument for InteractiveFeedbackEvaluator
+        super().__init__(model, None, 'None', 'None')
+
+    def __call__(self, video: Tensor, system_prompt: str, **sampling_kwargs):
+        """
+        Peforms a single forward pass through the model and returns the output tokens for the given dataset index
+        
+        :param video:
+            Video features tensor to be evaluated.
+            The system prompt that is specific to the sequence of exercises under evaluation.
+        """
+
+        # Prepare inputs to the model
+        input_prompt = system_prompt + VISION_TOKEN
+        input_prompt = self.model.tokenizer.encode(input_prompt)
+        vision_xattn_mask = self._get_vision_xattn_mask(input_prompt)
+        vision_xattn_mask = [2 if tok == 1 else 0 for tok in vision_xattn_mask]
+
+        # Generate Feedbacks
+        out = self.model.generate(
+            input_prompt=input_prompt,
+            video=video.unsqueeze(0), # add batch dimension
+            vision_xattn_mask=vision_xattn_mask,
+            **sampling_kwargs,
+        )
+
+        return out
