@@ -181,19 +181,20 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
             model_attention_mask = attention_mask[:, :-1]
 
         for key, embedding in multi_model_embedding.items():
-            if (key in ["vision_xattn_mask", "language_timestamps"]) and embedding is not None:
+            if (key in ["vision_xattn_mask", "language_timestamps", "text_tokens"]) and embedding is not None:
                 multi_model_embedding[key] = multi_model_embedding[key][:, :-1]
-            elif isinstance(embedding, dict): #and "vision" in embedding.keys():
-                multi_model_embedding[key]["vision"] = embedding["vision"][:, 1:]
+            elif isinstance(embedding, dict) and "vision" in embedding.keys():
+                multi_model_embedding[key]["vision"] = embedding["vision"][:, :-1]
             # for some reason there's this one
-            # elif isinstance(embedding, dict) and "comb" in embedding.keys():
-            #     multi_model_embedding[key]["comb"] = embedding["comb"][:, 1:]
+            elif isinstance(embedding, dict) and "comb" in embedding.keys():
+                multi_model_embedding[key]["comb"] = embedding["comb"][:, :-1]
 
         # Forward pass through the model
+        print("Starting forward pass...")
+        labels = kwargs.get("target_ids", None)
         lang_out = self.model.lang(
-            inputs_embeds=multi_model_embedding, attention_mask=model_attention_mask
+            inputs_embeds=multi_model_embedding, attention_mask=model_attention_mask, labels=labels
         )
-
         return lang_out
 
     @torch.no_grad()
@@ -245,6 +246,11 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
         feedback_mode = False
         # Continue generating until end of video
         logits = torch.zeros(input_ids.shape[0], 0, self.model.lang.config.vocab_size).to(self.device)
+
+        # Test a single forward pass
+        og_video = kwargs.get("og_video", None)
+        lang_out = self.forward(og_video, input_ids, vision_xattn_mask, attention_mask=None)
+
         while input_vision_idx < encoded_video["feats"].shape[1]:
             # Prepare video input
             encoded_video_feats = (
@@ -259,12 +265,10 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
                 ],
                 "spatial_res": encoded_video_spatial_res,
             }
-
             # Adapt video features
             multi_model_embedding = self.model.adapter(
                 encoded_video_in_range, output_ids, vision_xattn_mask
             )
-            # breakpoint()
 
             # Generate next token logits
             lang_out = self.model.lang(
@@ -377,4 +381,4 @@ class StreamVLModelWrapper(BaseVLModelWrapper):
         )
         # breakpoint()
         encoded_video = self.model.vision(video)
-        return self._generate_interactive(encoded_video, input_prompt, vision_xattn_mask, **kwargs)
+        return self._generate_interactive(encoded_video, input_prompt, vision_xattn_mask, og_video=video, **kwargs)
