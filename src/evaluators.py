@@ -507,8 +507,8 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
                 episode_start_timestamp = data["exercise_start_timestamp"]
                 episode_end_timestamp = data["exercise_end_timestamp"]
             except KeyError:
-                episode_start_timestamp = video_timestamps[0]-1e-12
-                episode_end_timestamp = video_timestamps[-1]+1e-12 
+                episode_start_timestamp = video_timestamps[0]
+                episode_end_timestamp = video_timestamps[-1]
 
             # The actual video files are at a different fps than the feature timestamps, so we need to be able 
             # to sync the two up when visualizing feedback on the actual video.
@@ -541,6 +541,23 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
                 vision_xattn_mask=vision_xattn_mask,
                 **sampling_kwargs,
             )
+            # sanity check - count number of frames with an action
+            # actions = 0
+            # if out.shape[0] == 1:
+            #     out = out[0]
+            # i = 0 
+            # while i < len(out):
+            #     if out[i] == self.model.special_tokens_dict[VISION_TOKEN] or out[i] == self.model.special_tokens_dict[FEEDBACK_BEGIN_TOKEN]:
+            #         actions += 1
+            #         i += 1
+            #     elif out[i] == self.model.special_tokens_dict[FEEDBACK_END_TOKEN]:
+            #         i += 2
+            #     else:
+            #         i += 1
+            # # print(f"Number of frames with an action: {actions}")
+            # print(actions)
+            # print(video.shape)
+            # breakpoint()
 
             # Process feedbacks
             pred_feedbacks, pred_feedback_timestamps = self._extract_pred_feedbacks(

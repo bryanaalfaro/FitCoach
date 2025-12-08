@@ -28,6 +28,8 @@ def model_builder_fn(
     max_memory: Optional[dict] = None,
     peft_config: Optional[dict] = None,
     xattn_config: Optional[dict] = None,
+    finetuned_path: Optional[str] = None,
+    trainable: dict = None,
     **kwargs,
 ) -> dict[str, Union[object, Callable]]:
     """
@@ -107,10 +109,24 @@ def model_builder_fn(
         # Load checkpoint
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
+        # Drop previous finetuned weights if currently training the LLM
+        # if trainable is not None and trainable.get("llm", False):
+        #     print("Dropping previous finetuned weights for LLM")
+        #     drop_keys = []
+        #     for key in checkpoint.keys():
+        #         if "lora" in key:
+        #             drop_keys.append(key)
+        #     for key in drop_keys:
+        #         checkpoint.pop(key)
+
         if "state_dict" in checkpoint.keys():
             model_module.load_state_dict(checkpoint["state_dict"], strict=strict_checkpoint)
         else:
             model_module.load_state_dict(checkpoint, strict=strict_checkpoint)
+    if finetuned_path is not None:
+        finetuned_checkpoint = torch.load(finetuned_path, map_location="cpu")
+        # breakpoint()
+        model_module.load_state_dict(finetuned_checkpoint["model_state"], strict=strict_checkpoint)
 
     # Init model wrapper
     model_wrapper = StreamVLModelWrapper
@@ -177,16 +193,17 @@ def make_model(
             "checkpoint_path": checkpoint_path,
             "max_memory": max_memory,
             "trust_remote_code": True,
+            "finetuned_path": model_kwargs.get("finetuned_path", None),
         }
     )
-    model = model_builder_fn(**model_kwargs)
+    model = model_builder_fn(trainable=trainable, **model_kwargs)
 
     # Set model device
     for sub_model in model.values():
         try:
             sub_model.to(device, dtype=model_dtype)
         except (AttributeError, TypeError, RuntimeError) as e:
-            print(e, type(make_model), " cannot be sent to ", device)
+            print(e, sub_model, type(sub_model), " cannot be sent to ", device)
 
     # Wrap model
     wrapper_kwargs = {

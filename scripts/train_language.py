@@ -27,6 +27,8 @@ from src.constants import (
 from src.fitness_datasets import load_dataset
 from src.model_helpers import make_model
 
+# For easy conversion of logits to text if using a debugger
+from src.utils import logits_to_text
 # This contains helpful functions for dataset preparation
 from src.evaluators import InteractiveFeedbackEvaluator
 
@@ -121,7 +123,7 @@ def build_streaming_sequence(
         input_ids.append(special_token_ids[VISION_TOKEN])
         # attention_mask.append(1)
         # vision_xattn_mask.append(2)
-        loss_mask.append(0)
+        loss_mask.append(1)
 
         for feedback in frame_buckets[frame_idx]:
             input_ids.append(special_token_ids[FEEDBACK_BEGIN_TOKEN])
@@ -273,21 +275,6 @@ def load_checkpoint(model_wrapper, optimizer, ckpt_path: str) -> tuple[int, int]
     optimizer.load_state_dict(ckpt["optimizer_state"])
     return ckpt.get("epoch", 0), ckpt.get("step", 0)
 
-
-def compute_loss(
-    logits: torch.Tensor,
-    input_ids: torch.Tensor,
-    loss_mask: torch.Tensor,
-) -> torch.Tensor:
-    shift_logits = logits.reshape(-1, logits.size(-1))
-    shift_labels = input_ids[:, 1:].contiguous().view(-1)
-    shift_loss_mask = loss_mask[:, 1:].contiguous().view(-1)
-
-    targets = shift_labels.clone()
-    targets[shift_loss_mask == 0] = IGNORE_INDEX
-    return F.cross_entropy(shift_logits, targets, ignore_index=IGNORE_INDEX)
-
-
 def train() -> None:
     args = parse_args()
     config = _load_config(args.config)
@@ -360,32 +347,44 @@ def train() -> None:
     for epoch in range(start_epoch, max_epochs):
         for batch in dataloader:
             batch_size = batch["input_ids"].size(0)
-            samples_seen += batch_size
 
             video = batch["video"].to(device=device, dtype=model_dtype, non_blocking=True)
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             vision_xattn_mask = batch["vision_xattn_mask"].to(device, non_blocking=True)
             loss_mask = batch["loss_mask"].to(device, non_blocking=True)
-
+            
             # input_ids contains BOS token and full feedback ground truth, so we separate into a input_ids and target_ids
-            targets = input_ids[:, 1:]
-            inputs = input_ids[:, :-1]
+            targets = input_ids.clone()
+            targets_masked = targets.clone()
+            targets_masked[~loss_mask.bool()] = IGNORE_INDEX
+            # targets = input_ids[:, 1:]
+            # inputs = input_ids[:, :-1]
 
             outputs = model(
                 video=video,
                 input_ids=input_ids,
                 vision_xattn_mask=vision_xattn_mask,
                 attention_mask=attention_mask,
-                target_ids=targets,
+                target_ids=targets_masked,
             )
-            breakpoint()
-            loss = compute_loss(outputs["logits"], input_ids, loss_mask)
+            # Before training outputs
+            if epoch == 0 and samples_seen == 0:
+                print('-' * 20)
+                print(f"Target: {model.tokenizer.decode(targets[0])}")
+                print()
+                print(f"Output: {logits_to_text(outputs['logits'], model.tokenizer)}")
+                print('-' * 20)
+
+            samples_seen += batch_size
+            loss = outputs["loss"]
+            # print(f"Loss: {loss.item()}")
             loss = loss / grad_accum
             loss.backward()
 
             running_loss += loss.item()
             micro_step += 1
+
 
             if micro_step % grad_accum == 0:
                 micro_step = 0
@@ -402,9 +401,16 @@ def train() -> None:
                     )
                     running_loss = 0.0
 
-                if global_step % save_every == 0:
-                    ckpt_path = os.path.join(output_dir, f"checkpoint_step_{global_step}.pt")
-                    save_checkpoint(model, optimizer, global_step, epoch, ckpt_path)
+                    print('-' * 20)
+                    print(f"Target: {model.tokenizer.decode(targets[0])}")
+                    print()
+                    print(f"Output: {logits_to_text(outputs['logits'], model.tokenizer)}")
+                    print('-' * 20)
+
+                # For now can't save checkpoints, running low on storage
+                # if global_step % save_every == 0:
+                #     ckpt_path = os.path.join(output_dir, f"checkpoint_step_{global_step}.pt")
+                #     save_checkpoint(model, optimizer, global_step, epoch, ckpt_path)
 
                 progress.update(1)
 
