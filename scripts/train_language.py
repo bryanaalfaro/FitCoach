@@ -155,6 +155,8 @@ def build_streaming_sequence(
     )[0]
     vision_xattn_mask = np.array([0] * len(input_ids))
     vision_xattn_mask[valid_video_indices] = 1
+    # re-unmask any vision tokens from the prompt (needed for sliding window)
+    vision_xattn_mask[:len(prompt_ids)] = 0
     return StreamingSequence(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -200,37 +202,87 @@ class WorkoutTrainingDataset(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        # usual path when not doing a sliding window
+        if "segments" not in self.dataset[idx].keys():
+            record = self.dataset[idx]
+            video = np.load(record["efficientnet_features_path"])
+            video = video.astype(np.float32)
+            video_timestamps = np.load(record["efficientnet_timestamps_path"]).astype(np.float64)
+            ep_start = record.get("exercise_start_timestamp", video_timestamps[0])
+            ep_end = record.get("exercise_end_timestamp", video_timestamps[-1])
+            video = InteractiveFeedbackEvaluator._get_video_for_episode(
+                video, video_timestamps, ep_start, ep_end
+            )
+            video_timestamps = clip_timestamps(video_timestamps, ep_start, ep_end)
+
+            responses = record["responses"]
+            response_timestamps = record["response_timestamps"]
+
+            seq = build_streaming_sequence(
+                tokenizer=self.tokenizer,
+                system_prompt=record["system"] + VISION_TOKEN,
+                responses=responses,
+                response_timestamps=response_timestamps,
+                video_timestamps=video_timestamps,
+                special_token_ids=self.special_token_ids,
+                max_sequence_length=self.max_sequence_length,
+            )
+
+            return {
+                "video": video,
+                "input_ids": np.array(seq.input_ids, dtype=np.int64),
+                "attention_mask": np.array(seq.attention_mask, dtype=np.int64),
+                "vision_xattn_mask": np.array(seq.vision_xattn_mask, dtype=np.int64),
+                "loss_mask": np.array(seq.loss_mask, dtype=np.int64),
+            }
+        
+        # sliding window dataset, do the same as above but for each segment and using the previous feedbacks as the system prompt
         record = self.dataset[idx]
+        system_prompt = record["system"]
+        skip_prompt = len(self.tokenizer.encode(system_prompt))
+        prompt_append = VISION_TOKEN
         video = np.load(record["efficientnet_features_path"])
         video = video.astype(np.float32)
         video_timestamps = np.load(record["efficientnet_timestamps_path"]).astype(np.float64)
-        ep_start = record.get("exercise_start_timestamp", video_timestamps[0])
-        ep_end = record.get("exercise_end_timestamp", video_timestamps[-1])
-        video = InteractiveFeedbackEvaluator._get_video_for_episode(
-            video, video_timestamps, ep_start, ep_end
-        )
-        video_timestamps = clip_timestamps(video_timestamps, ep_start, ep_end)
+        video_segments = []
+        input_ids_segments = []
+        attention_mask_segments = []
+        vision_xattn_mask_segments = []
+        loss_mask_segments = []
 
-        responses = record["responses"]
-        response_timestamps = record["response_timestamps"]
-
-        seq = build_streaming_sequence(
-            tokenizer=self.tokenizer,
-            system_prompt=record["system"] + VISION_TOKEN,
-            responses=responses,
-            response_timestamps=response_timestamps,
-            video_timestamps=video_timestamps,
-            special_token_ids=self.special_token_ids,
-            max_sequence_length=self.max_sequence_length,
-        )
-
+        for segment in record["segments"]:
+            ep_start = segment["exercise_start_timestamp"]
+            ep_end = segment["exercise_end_timestamp"]
+            video_segment = InteractiveFeedbackEvaluator._get_video_for_episode(
+                video, video_timestamps, ep_start, ep_end
+            )
+            video_timestamps_segment = clip_timestamps(video_timestamps, ep_start, ep_end)
+            video_segments.append(video_segment)
+            seq_segment = build_streaming_sequence(
+                tokenizer=self.tokenizer,
+                system_prompt=system_prompt + prompt_append,
+                responses=segment["responses"],
+                response_timestamps=segment["response_timestamps"],
+                video_timestamps=video_timestamps_segment,
+                special_token_ids=self.special_token_ids,
+                max_sequence_length=self.max_sequence_length,
+            )
+            input_ids_segments.append(seq_segment.input_ids)
+            attention_mask_segments.append(seq_segment.attention_mask)
+            vision_xattn_mask_segments.append(seq_segment.vision_xattn_mask)
+            loss_mask_segments.append(seq_segment.loss_mask)
+            prompt_append = self.tokenizer.decode(seq_segment.input_ids[skip_prompt:])
+            skip_prompt = len(self.tokenizer.encode(system_prompt + prompt_append))
+        
         return {
-            "video": video,
-            "input_ids": np.array(seq.input_ids, dtype=np.int64),
-            "attention_mask": np.array(seq.attention_mask, dtype=np.int64),
-            "vision_xattn_mask": np.array(seq.vision_xattn_mask, dtype=np.int64),
-            "loss_mask": np.array(seq.loss_mask, dtype=np.int64),
+            "video": video_segments,
+            "input_ids": input_ids_segments,
+            "attention_mask": attention_mask_segments,
+            "vision_xattn_mask": vision_xattn_mask_segments,
+            "loss_mask": loss_mask_segments,
         }
+            
+            
 
 
 class Collator:
@@ -247,14 +299,67 @@ class Collator:
             )
 
         sample = batch[0]
-        video = torch.from_numpy(sample["video"]).unsqueeze(0)  # [1, T, C, H, W]
-        out: Dict[str, torch.Tensor] = {
+
+        # Single windows:
+        if isinstance(sample["video"], np.ndarray):
+            video = torch.from_numpy(sample["video"]).unsqueeze(0)  # [1, T, C, H, W]
+            out: Dict[str, torch.Tensor] = {
+                "video": video,
+                "input_ids": torch.from_numpy(sample["input_ids"]).unsqueeze(0),
+                "attention_mask": torch.from_numpy(sample["attention_mask"]).unsqueeze(0),
+                "vision_xattn_mask": torch.from_numpy(sample["vision_xattn_mask"]).unsqueeze(0),
+                "loss_mask": torch.from_numpy(sample["loss_mask"]).unsqueeze(0),
+            }
+            return out
+        # Otherwise, sliding window gives a list of each of the above keys for each segment - need to stack and pad
+        video_list = list(map(torch.tensor, sample["video"]))
+        max_frames = 0
+        for v in video_list:
+            max_frames = max(max_frames, v.shape[0])
+        video = torch.zeros(len(video_list), max_frames, *video_list[0].shape[1:], dtype=torch.float32)
+        for i, v in enumerate(video_list):
+            video[i, :v.shape[0]] = v
+
+        input_ids_list = list(map(torch.tensor, sample["input_ids"]))
+        max_input_ids = 0
+        for i in input_ids_list:
+            max_input_ids = max(max_input_ids, i.shape[0])
+        input_ids = self.pad_token_id * torch.ones(len(input_ids_list), max_input_ids, dtype=torch.int64)
+        for i, ids in enumerate(input_ids_list):
+            input_ids[i, :ids.shape[0]] = ids.int()
+
+        attention_mask_list = list(map(torch.tensor, sample["attention_mask"]))
+        max_attention_mask = 0
+        for i in attention_mask_list:
+            max_attention_mask = max(max_attention_mask, i.shape[0])
+        attention_mask = torch.zeros(len(attention_mask_list), max_attention_mask, dtype=torch.int64)
+        for i, mask in enumerate(attention_mask_list):
+            attention_mask[i, :mask.shape[0]] = mask.int()
+
+        vision_xattn_mask_list = list(map(torch.tensor, sample["vision_xattn_mask"]))
+        max_vision_xattn_mask = 0
+        for i in vision_xattn_mask_list:
+            max_vision_xattn_mask = max(max_vision_xattn_mask, i.shape[0])
+        vision_xattn_mask = torch.zeros(len(vision_xattn_mask_list), max_vision_xattn_mask, dtype=torch.int64)
+        for i, mask in enumerate(vision_xattn_mask_list):
+            vision_xattn_mask[i, :mask.shape[0]] = mask.int()
+        
+        loss_mask_list = list(map(torch.tensor, sample["loss_mask"]))
+        max_loss_mask = 0
+        for i in loss_mask_list:
+            max_loss_mask = max(max_loss_mask, i.shape[0])
+        loss_mask = torch.zeros(len(loss_mask_list), max_loss_mask, dtype=torch.int64)
+        for i, mask in enumerate(loss_mask_list):
+            loss_mask[i, :mask.shape[0]] = mask.int()
+        
+        out = {
             "video": video,
-            "input_ids": torch.from_numpy(sample["input_ids"]).unsqueeze(0),
-            "attention_mask": torch.from_numpy(sample["attention_mask"]).unsqueeze(0),
-            "vision_xattn_mask": torch.from_numpy(sample["vision_xattn_mask"]).unsqueeze(0),
-            "loss_mask": torch.from_numpy(sample["loss_mask"]).unsqueeze(0),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "vision_xattn_mask": vision_xattn_mask,
+            "loss_mask": loss_mask,
         }
+
         return out
 
 
@@ -282,7 +387,7 @@ def train() -> None:
     dataset_cfg = config["datasets"]["train"]
     training_cfg = config["training"]
 
-    hf_dataset = load_dataset(dataset_cfg["name"], **dataset_cfg["kwargs"])
+    qevd = load_dataset(dataset_cfg["name"], **dataset_cfg["kwargs"])
 
     llama_path = config["model"]["llama2_7b_path"]
     model_kwargs = config["model"]["kwargs"]
@@ -295,11 +400,10 @@ def train() -> None:
     model.train()
 
     training_dataset = WorkoutTrainingDataset(
-        hf_dataset,
+        qevd,
         tokenizer=model.tokenizer,
         max_sequence_length=training_cfg.get("max_sequence_length"),
     )
-    # breakpoint()
     collator = Collator(model.tokenizer.pad_token_id or model.tokenizer.eos_token_id)
     dataloader = DataLoader(
         training_dataset,
@@ -309,6 +413,7 @@ def train() -> None:
         collate_fn=collator,
         pin_memory=True,
     )
+
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -360,7 +465,7 @@ def train() -> None:
             targets_masked[~loss_mask.bool()] = IGNORE_INDEX
             # targets = input_ids[:, 1:]
             # inputs = input_ids[:, :-1]
-
+            # breakpmuoint()
             outputs = model(
                 video=video,
                 input_ids=input_ids,
@@ -371,7 +476,7 @@ def train() -> None:
             # Before training outputs
             if epoch == 0 and samples_seen == 0:
                 print('-' * 20)
-                print(f"Target: {model.tokenizer.decode(targets[0])}")
+                print(f"Target: {model.tokenizer.batch_decode(targets)}")
                 print()
                 print(f"Output: {logits_to_text(outputs['logits'], model.tokenizer)}")
                 print('-' * 20)
