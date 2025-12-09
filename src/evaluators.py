@@ -469,6 +469,67 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
             tqdm.write(f"BERT Score: {self.mean(bert_scores):.3f}")
         tqdm.write(f"Temporal F-Score: {t_f_score:.3f}")
 
+    
+    def _process_single_video_evaluation(
+            self,
+            data: dict,
+            system_prompt: str = None,
+            efficientnet_features_path: str = None,
+            efficientnet_timestamps_path: str = None,
+            video_path: str = None,
+            video_timestamps_path: str = None,
+            prompt_append: str = VISION_TOKEN,
+            **sampling_kwargs
+        ):
+        """
+        Note: the none parameters are to be overridden by the caller if using a
+        sliding window dataset since the data dict will not contain those keys.
+        """
+
+        feat_path = data.get("efficientnet_features_path", efficientnet_features_path)
+        system_prompt = data.get("system", system_prompt)
+        gt_feedbacks = data["responses"]
+        gt_feedback_timestamps = data["response_timestamps"]
+
+        video = np.load(feat_path)
+        video_timestamps = np.load(data.get("efficientnet_timestamps_path", efficientnet_timestamps_path))
+
+        # Bug in orginal code: these do not exist if in full workout evaluation mode
+        episode_start_timestamp = data.get("exercise_start_timestamp", video_timestamps[0])
+        episode_end_timestamp = data.get("exercise_end_timestamp", video_timestamps[-1])
+
+        # The actual video files are at a different fps than the feature timestamps, so we need to be able 
+        # to sync the two up when visualizing feedback on the actual video.
+        real_vid = cv2.VideoCapture(data.get('video_path', video_path))
+        real_vid_fps = real_vid.get(cv2.CAP_PROP_FPS)
+        real_vid_frames = real_vid.get(cv2.CAP_PROP_FRAME_COUNT)
+        real_vid_duration_seconds = real_vid_frames / real_vid_fps
+        feature_duration_seconds = video_timestamps[-1] - video_timestamps[0]
+        ratio = real_vid_duration_seconds / feature_duration_seconds
+        real_vid.release()
+        real_start = self._convert_timestamp_to_human_readable(ratio*(episode_start_timestamp - video_timestamps[0]))
+        real_end = self._convert_timestamp_to_human_readable(ratio*(episode_end_timestamp - video_timestamps[0]))
+        print(f"Getting video features from {feat_path}: {real_start} to {real_end}")
+        video = self._get_video_for_episode(
+            video, video_timestamps, episode_start_timestamp, episode_end_timestamp
+        )
+        # breakpoint()
+
+        # Prepare inputs to the model
+        input_prompt = system_prompt + VISION_TOKEN
+        input_prompt = self.model.tokenizer.encode(input_prompt)
+        vision_xattn_mask = self._get_vision_xattn_mask(input_prompt)
+        vision_xattn_mask = [2 if tok == 1 else 0 for tok in vision_xattn_mask]
+
+        # Generate Feedback
+        out = self.model.generate(
+            input_prompt=input_prompt,
+            video=video,
+            vision_xattn_mask=vision_xattn_mask,
+            **sampling_kwargs,
+        )
+        return out, gt_feedbacks, gt_feedback_timestamps, episode_start_timestamp
+
     def __call__(self, **sampling_kwargs):
         """
         Prints the METEOR, Rouge-L, BERT and Temporal F-Scores; saves a json file with
@@ -494,71 +555,47 @@ class InteractiveFeedbackEvaluator(VisionLanguageEvaluator):
         for it in tqdm(eval_idxs):
             # Load data
             data = self.dataset[it]
-            feat_path = data["efficientnet_features_path"]
-            system_prompt = data["system"]
-            gt_feedbacks = data["responses"]
-            gt_feedback_timestamps = data["response_timestamps"]
+            # Standard single video/exercise evaluation
+            if "segments" not in data.keys():
+                out, gt_feedbacks, gt_feedback_timestamps, episode_start_timestamp = self._process_single_video_evaluation(
+                    data, **sampling_kwargs
+                )
+            # Do the same, but iterating over the segments (TODO: add the previous feedbacks to input prompt)
+            else:
+                first = True
+                gt_feedbacks = []
+                gt_feedback_timestamps = []
+                episode_start_timestamp = None
+                system_prompt = data["system"]
+                skip_prompt = len(self.model.tokenizer.encode(system_prompt)) # Needed for cleaning up output since each one will have the prompt
+                efficientnet_features_path = data["efficientnet_features_path"]
+                efficientnet_timestamps_path = data["efficientnet_timestamps_path"]
+                video_path = data["video_path"]
+                video_timestamps_path = data["video_timestamps_path"]
+                # last_feedbacks = ""
+                out = np.zeros((1, 0), dtype=np.int32)
+                for segment in data["segments"]:
+                    if first:
+                        first = False
+                        out_segment, segment_gt_feedbacks, segment_gt_feedback_timestamps, episode_start_timestamp = self._process_single_video_evaluation(
+                            segment, system_prompt, efficientnet_features_path, efficientnet_timestamps_path, video_path, video_timestamps_path, **sampling_kwargs
+                        )
+                        # keep prompt on the first output
+                        out = np.concatenate([out, out_segment], axis=-1)
+                    else:
+                        out_segment, segment_gt_feedbacks, segment_gt_feedback_timestamps, _ = self._process_single_video_evaluation(
+                            segment, prompt, efficientnet_features_path, efficientnet_timestamps_path, video_path, video_timestamps_path, "", **sampling_kwargs
+                        )
+                        out = np.concatenate([out, out_segment[:, skip_prompt:]], axis=-1)
+                    prompt_append = self.model.tokenizer.decode(out_segment[0, skip_prompt:])
+                    prompt = system_prompt + prompt_append
+                    # update skip_prompt because now it will also include the previous output tokens
+                    skip_prompt = len(self.model.tokenizer.encode(prompt))
+                    gt_feedbacks.extend(segment_gt_feedbacks)
+                    gt_feedback_timestamps.extend(segment_gt_feedback_timestamps)
+                    print(f"INFO: total predicted tokens so far: {len(out[0])}")
 
-            video = np.load(feat_path)
-            video_timestamps = np.load(data["efficientnet_timestamps_path"])
-
-            # Bug in orginal code: these do not exist if in full workout evaluation mode
-            try:
-                episode_start_timestamp = data["exercise_start_timestamp"]
-                episode_end_timestamp = data["exercise_end_timestamp"]
-            except KeyError:
-                episode_start_timestamp = video_timestamps[0]
-                episode_end_timestamp = video_timestamps[-1]
-
-            # The actual video files are at a different fps than the feature timestamps, so we need to be able 
-            # to sync the two up when visualizing feedback on the actual video.
-            real_vid = cv2.VideoCapture(data['video_path'])
-            real_vid_fps = real_vid.get(cv2.CAP_PROP_FPS)
-            real_vid_frames = real_vid.get(cv2.CAP_PROP_FRAME_COUNT)
-            real_vid_duration_seconds = real_vid_frames / real_vid_fps
-            feature_duration_seconds = video_timestamps[-1] - video_timestamps[0]
-            ratio = real_vid_duration_seconds / feature_duration_seconds
-            real_vid.release()
-            real_start = self._convert_timestamp_to_human_readable(ratio*(episode_start_timestamp - video_timestamps[0]))
-            real_end = self._convert_timestamp_to_human_readable(ratio*(episode_end_timestamp - video_timestamps[0]))
-            print(f"Getting video features from {feat_path}: {real_start} to {real_end}")
-
-            video = self._get_video_for_episode(
-                video, video_timestamps, episode_start_timestamp, episode_end_timestamp
-            )
-            # breakpoint()
-
-            # Prepare inputs to the model
-            input_prompt = system_prompt + VISION_TOKEN
-            input_prompt = self.model.tokenizer.encode(input_prompt)
-            vision_xattn_mask = self._get_vision_xattn_mask(input_prompt)
-            vision_xattn_mask = [2 if tok == 1 else 0 for tok in vision_xattn_mask]
-
-            # Generate Feedback
-            out = self.model.generate(
-                input_prompt=input_prompt,
-                video=video,
-                vision_xattn_mask=vision_xattn_mask,
-                **sampling_kwargs,
-            )
-            # sanity check - count number of frames with an action
-            # actions = 0
-            # if out.shape[0] == 1:
-            #     out = out[0]
-            # i = 0 
-            # while i < len(out):
-            #     if out[i] == self.model.special_tokens_dict[VISION_TOKEN] or out[i] == self.model.special_tokens_dict[FEEDBACK_BEGIN_TOKEN]:
-            #         actions += 1
-            #         i += 1
-            #     elif out[i] == self.model.special_tokens_dict[FEEDBACK_END_TOKEN]:
-            #         i += 2
-            #     else:
-            #         i += 1
-            # # print(f"Number of frames with an action: {actions}")
-            # print(actions)
-            # print(video.shape)
-            # breakpoint()
-
+           
             # Process feedbacks
             pred_feedbacks, pred_feedback_timestamps = self._extract_pred_feedbacks(
                 out[0], feats_frequency
