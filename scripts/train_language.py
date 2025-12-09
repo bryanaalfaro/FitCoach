@@ -64,6 +64,16 @@ def _token_id(tokenizer, token: str) -> int:
         raise ValueError(f"Tokenizer could not encode token: {token}")
     return ids[-1]
 
+def _append_tensors_with_padding(tensors: List[torch.Tensor]) -> torch.Tensor:
+    """
+    Append tensors with padding to the same length. Currently only works for 2D tensors with the size of dim 1 = 1
+    """
+    max_length = max(t.shape[1] for t in tensors)
+    padded_tensors = torch.zeros(len(tensors), max_length).to(tensors[0])
+    for i, t in enumerate(tensors):
+        padded_tensors[i:i+1, :t.shape[1]] = t
+    return padded_tensors
+
 
 @dataclass
 class StreamingSequence:
@@ -90,7 +100,7 @@ def build_streaming_sequence(
     if tokenizer.eos_token_id is not None and prompt_ids[-1] == tokenizer.eos_token_id:
         prompt_ids = prompt_ids[:-1]
 
-    input_ids: List[int] = list(prompt_ids)
+    input_ids: List[int] = list(prompt_ids) + [tokenizer.encode(VISION_TOKEN)[-1]]
     # attention_mask: List[int] = [1] * len(input_ids)
     # vision_xattn_mask: List[int] = [0] * len(input_ids)
     # ignore prompt tokens (prompt includes one vision token, may need to change this)
@@ -156,6 +166,7 @@ def build_streaming_sequence(
     vision_xattn_mask = np.array([0] * len(input_ids))
     vision_xattn_mask[valid_video_indices] = 1
     # re-unmask any vision tokens from the prompt (needed for sliding window)
+    # breakpoint()
     vision_xattn_mask[:len(prompt_ids)] = 0
     return StreamingSequence(
         input_ids=input_ids,
@@ -220,7 +231,7 @@ class WorkoutTrainingDataset(Dataset):
 
             seq = build_streaming_sequence(
                 tokenizer=self.tokenizer,
-                system_prompt=record["system"] + VISION_TOKEN,
+                system_prompt=record["system"],
                 responses=responses,
                 response_timestamps=response_timestamps,
                 video_timestamps=video_timestamps,
@@ -351,13 +362,12 @@ class Collator:
         loss_mask = torch.zeros(len(loss_mask_list), max_loss_mask, dtype=torch.int64)
         for i, mask in enumerate(loss_mask_list):
             loss_mask[i, :mask.shape[0]] = mask.int()
-        
         out = {
-            "video": video,
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "vision_xattn_mask": vision_xattn_mask,
-            "loss_mask": loss_mask,
+            "video": video_list,
+            "input_ids": input_ids_list,
+            "attention_mask": attention_mask_list,
+            "vision_xattn_mask": vision_xattn_mask_list,
+            "loss_mask": loss_mask_list,
         }
 
         return out
@@ -451,38 +461,68 @@ def train() -> None:
     micro_step = 0
     for epoch in range(start_epoch, max_epochs):
         for batch in dataloader:
-            batch_size = batch["input_ids"].size(0)
+            if isinstance(batch["video"], torch.Tensor):
+                batch_size = batch["input_ids"].size(0)
 
-            video = batch["video"].to(device=device, dtype=model_dtype, non_blocking=True)
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            vision_xattn_mask = batch["vision_xattn_mask"].to(device, non_blocking=True)
-            loss_mask = batch["loss_mask"].to(device, non_blocking=True)
-            
-            # input_ids contains BOS token and full feedback ground truth, so we separate into a input_ids and target_ids
-            targets = input_ids.clone()
-            targets_masked = targets.clone()
-            targets_masked[~loss_mask.bool()] = IGNORE_INDEX
-            # targets = input_ids[:, 1:]
-            # inputs = input_ids[:, :-1]
-            # breakpmuoint()
-            outputs = model(
-                video=video,
-                input_ids=input_ids,
-                vision_xattn_mask=vision_xattn_mask,
-                attention_mask=attention_mask,
-                target_ids=targets_masked,
-            )
+                video = batch["video"].to(device=device, dtype=model_dtype, non_blocking=True)
+                input_ids = batch["input_ids"].to(device, non_blocking=True)
+                attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+                vision_xattn_mask = batch["vision_xattn_mask"].to(device, non_blocking=True)
+                loss_mask = batch["loss_mask"].to(device, non_blocking=True)
+                targets = input_ids.clone()
+                targets_masked = targets.clone()
+                targets_masked[~loss_mask.bool()] = IGNORE_INDEX
+                outputs = model(
+                    video=video,
+                    input_ids=input_ids,
+                    vision_xattn_mask=vision_xattn_mask,
+                    attention_mask=attention_mask,
+                    target_ids=targets_masked,
+                )
+                loss = outputs["loss"]
+                outputs = outputs["logits"].detach().cpu()
+
+            else:
+                batch_size = 1
+                loss = 0.0
+                targets = []
+                outputs = []
+                for i in range(len(batch["video"])):
+                    video = batch["video"][i].to(device=device, dtype=model_dtype, non_blocking=True).unsqueeze(0)
+                    input_ids = batch["input_ids"][i].to(device, non_blocking=True).unsqueeze(0)
+                    attention_mask = batch["attention_mask"][i].to(device, non_blocking=True).unsqueeze(0)
+                    vision_xattn_mask = batch["vision_xattn_mask"][i].to(device, non_blocking=True).unsqueeze(0)
+                    loss_mask = batch["loss_mask"][i].to(device, non_blocking=True).unsqueeze(0)
+                    targets_segment = input_ids.clone()
+                    targets_masked = targets_segment.clone()
+                    targets_masked[~loss_mask.bool()] = IGNORE_INDEX
+                    outputs_segment = model(
+                        video=video,
+                        input_ids=input_ids,
+                        vision_xattn_mask=vision_xattn_mask,
+                        attention_mask=attention_mask,
+                        target_ids=targets_masked,
+                    )
+                    targets.append(targets_segment)
+                    outputs.append(outputs_segment["logits"].detach().cpu())
+                    loss += outputs_segment["loss"]/len(batch["video"])
+                targets = _append_tensors_with_padding(targets)
+                # Outputs are logits
+                max_length = max(o.shape[1] for o in outputs)
+                outputs_padded = torch.zeros(len(outputs), max_length, outputs[0].shape[2]).to(outputs[0])
+                for i, o in enumerate(outputs):
+                    outputs_padded[i, :o.shape[1]] = o[0]
+                outputs = outputs_padded
             # Before training outputs
             if epoch == 0 and samples_seen == 0:
                 print('-' * 20)
                 print(f"Target: {model.tokenizer.batch_decode(targets)}")
                 print()
-                print(f"Output: {logits_to_text(outputs['logits'], model.tokenizer)}")
+                print(f"Output: {logits_to_text(outputs, model.tokenizer)}")
                 print('-' * 20)
+                breakpoint()
 
             samples_seen += batch_size
-            loss = outputs["loss"]
             # print(f"Loss: {loss.item()}")
             loss = loss / grad_accum
             loss.backward()
@@ -507,9 +547,9 @@ def train() -> None:
                     running_loss = 0.0
 
                     print('-' * 20)
-                    print(f"Target: {model.tokenizer.decode(targets[0])}")
+                    print(f"Target: {model.tokenizer.batch_decode(targets)}")
                     print()
-                    print(f"Output: {logits_to_text(outputs['logits'], model.tokenizer)}")
+                    print(f"Output: {logits_to_text(outputs, model.tokenizer)}")
                     print('-' * 20)
 
                 # For now can't save checkpoints, running low on storage
