@@ -1,5 +1,7 @@
 # Stream-VLM
 
+## NOTE: the following instructions are from the original FitCoach repo and are for setting up the environment needed on a machine to run the project. The other branches in this repo contain project-specific READMEs.
+
 <p align="center">
   <img width="640" src="/assets/stream_vlm.png" hspace="50">
 </p>
