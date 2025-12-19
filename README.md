@@ -8,8 +8,8 @@ The streaming system transforms the offline FitCoach baseline into a real-time a
 
 1. `scripts/live_feedback_lightweight.py` - Core streaming implementation
 2. `configs/live_lightweight.yaml` - Configuration parameters
-3. `FitCoach_Live_Feedback.ipynb` - Interactive demo notebook (single video or webcam)
-4. `FitCoach_Live_Evaluation.ipynb` - Full benchmark evaluation notebook
+3. `notebooks/FitCoach_Live_Feedback.ipynb` - Interactive demo notebook (single video or webcam)
+4. `notebooks/FitCoach_Live_Evaluation.ipynb` - Full benchmark evaluation notebook
 
 ---
 
@@ -97,7 +97,7 @@ evaluator:
 
 ---
 
-### 3. `FitCoach_Live_Feedback.ipynb`
+### 3. `notebooks/FitCoach_Live_Feedback.ipynb`
 
 **Purpose**: Interactive demo notebook for Google Colab providing **both** single-video processing and live webcam feedback.
 
@@ -109,7 +109,7 @@ evaluator:
 
 ---
 
-### 4. `FitCoach_Live_Evaluation.ipynb`
+### 4. `notebooks/FitCoach_Live_Evaluation.ipynb`
 
 **Purpose**: Full benchmark evaluation measuring system performance on all 74 videos from the QEVD-FIT-COACH dataset.
 
