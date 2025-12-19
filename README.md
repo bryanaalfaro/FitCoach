@@ -1,3 +1,124 @@
+# Streaming Live Feedback System - Implementation Guide
+
+This document describes the implementation details and reproduction instructions for the FitCoach streaming live feedback system.
+
+## Overview
+
+The streaming system transforms the offline FitCoach baseline into a real-time architecture capable of processing video incrementally with fixed memory requirements. The implementation consists of 4 key files:
+
+1. `scripts/live_feedback_lightweight.py` - Core streaming implementation
+2. `configs/live_lightweight.yaml` - Configuration parameters
+3. `FitCoach_Live_Feedback.ipynb` - Interactive demo notebook (single video or webcam)
+4. `FitCoach_Live_Evaluation.ipynb` - Full benchmark evaluation notebook
+
+---
+
+## File Descriptions
+
+### 1. `scripts/live_feedback_lightweight.py`
+
+**Purpose**: Main implementation of the streaming feedback system optimized for consumer hardware.
+
+**Key Components**:
+
+#### `LightweightFeedbackCoach` Class
+
+- **Rolling Buffer**: Implements FIFO frame management
+
+  - Default capacity: 200 preprocessed frames (100 seconds at 2 fps)
+  - Automatically evicts oldest frames when full
+  - Configurable via `max_buffer_size` parameter
+
+- **Feature Extraction** (`preprocess_frame` method):
+
+  - Uses 3D CNN's built-in preprocessing pipeline
+  - Applies ImageNet normalization (embedded in `self.cnn_model.transforms()`)
+  - Returns preprocessed frame as numpy array ready for buffering
+
+- **Dynamic Feature Extraction** (`generate_feedback` method):
+
+  - Operates on windowed subsets of the buffer (default: last 60 frames = 30 seconds)
+  - Extracts CNN features on-demand using `self.cnn_model.features()`
+  - Applies global average pooling over spatial dimensions
+  - Performs temporal averaging to compress sequence to single vector
+  - Reshapes to `[1, 1, 1, 1280]` format expected by LLaMA-2 adapter
+
+- **Memory Optimizations**:
+
+  - BFloat16 precision throughout (configured in YAML)
+  - Reduced max feedback length: 48 tokens vs baseline's 128
+  - Aggressive cache clearing with `torch.cuda.empty_cache()`
+  - Out-of-memory recovery:
+    - Clears CUDA cache
+    - Reduces buffer to 20 frames minimum
+    - Triggers Python garbage collection
+
+- **Autoregressive Generation** (`_generate_single_feedback`):
+
+  - Greedy decoding with temperature=0 for deterministic output
+  - KV-cache enabled for efficiency
+
+---
+
+### 2. `configs/live_lightweight.yaml`
+
+**Purpose**: Configuration file for streaming system parameters.
+
+**Key Parameters**:
+
+```yaml
+model:
+  llama2_7b_path: "./Llama-2-7b-hf"
+  kwargs:
+    checkpoint_path: "./ckpts_streamvlm/ckpts_streamvlm/state_dict.pth.tar"
+    bf16: True # BFloat16 precision
+    xattn_config:
+      xattn_type: "dotprod"
+      adapter_insert_layers: "[6, 8, 10, 12, 14, 16, 18, 20, 22]"
+      # Cross-attention adapters at every 2 layers
+
+evaluator:
+  sampling_kwargs:
+    do_sample: False # Greedy decoding (temperature=0)
+    temperature: 0.
+    max_feedback_length: 48 # Reduced from baseline's 128
+    feats_frequency: 2 # Feature extraction at 2 fps
+    feedback_interval: 15.0 # Generate feedback every 15 seconds
+```
+
+**Design Rationale**:
+
+- **2 fps feature rate**: Balances temporal resolution with computational cost (baseline uses 4 fps)
+- **15-second intervals**: Provides regular feedback while limiting GPU inference frequency
+- **48 token limit**: Reduces KV-cache memory requirements by over 60% vs baseline
+- **BFloat16**: Halves memory footprint with minimal quality impact
+
+---
+
+### 3. `FitCoach_Live_Feedback.ipynb`
+
+**Purpose**: Interactive demo notebook for Google Colab providing **both** single-video processing and live webcam feedback.
+
+**What it does**:
+
+- **Option A - Single Video**: Upload and process a workout video with frame-by-frame feedback generation
+- **Option B - Live Webcam**: Real-time webcam coaching with live feedback overlay displayed in the browser
+- Provides immediate visual feedback during processing
+
+---
+
+### 4. `FitCoach_Live_Evaluation.ipynb`
+
+**Purpose**: Full benchmark evaluation measuring system performance on all 74 videos from the QEVD-FIT-COACH dataset.
+
+**What it does**:
+
+- Processes all 74 benchmark videos sequentially in streaming mode
+- Computes temporal precision/recall/F1 using 3-second matching window
+- Evaluates text quality with METEOR, ROUGE-L, and BERT Score
+
+
+# Original README from FitCoach:
 # Stream-VLM
 
 <p align="center">
