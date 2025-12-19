@@ -1,7 +1,5 @@
 # Streaming Live Feedback System - Implementation Guide
 
-This document describes the implementation details and reproduction instructions for the FitCoach streaming live feedback system.
-
 ## Overview
 
 The streaming system transforms the offline FitCoach baseline into a real-time architecture capable of processing video incrementally with fixed memory requirements. The implementation consists of 4 key files:
