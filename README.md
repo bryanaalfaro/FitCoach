@@ -175,3 +175,16 @@ fitcoach
    year = {2024},
 }
 ```
+
+## Full-video finetuning
+This branch contains the code for finetuning the language backbone of the Stream-VLM with the goal of targetting improved performance when using a full ~3.5 minute workout sequence for evaluation instead of a 30 second clip of a single exercise. Here is a summary of the changes:
+
+### Implementation of training loop
+This was not included in the original repo, and we have implemented this functionality in `scripts/train_language.py`. This supports finetuning using the original 30-second video clips, full 3.5 minute workout videos, and with sliding window segments of a full video. This can be changed by modifiying the `eval_mode` field of a configuration file. Due to GPU memory constraints, we are limited to a batch size of 1 during training (meaning either 1 30-second clip or full workout, since they use the same collator function), and instead have implemented gradient accumulation. The training loop can be initiated with 
+```
+python scripts/train_language.py --config <path_to_config>
+```
+and we provide a sample config in `train_segments.yaml`
+
+### More evaluation modes
+As a result of introducing the capability of training using the sliding-window mode, in which the model's feedbacks from the previous window become a part of the prompt for the current window, we needed to include support for this in the base evaluators from the original repo. This capability has been added in `src/evaluators.py`, and methods for construcing a dataset that matches this format have been added in `src/fitness_datasets/fitcoach.py`. As before, modifying which mode is used is controlled through the `eval_mode` field in the config.
