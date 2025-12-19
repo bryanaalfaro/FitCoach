@@ -23,6 +23,8 @@ The streaming system transforms the offline FitCoach baseline into a real-time a
 
 #### `LightweightFeedbackCoach` Class
 
+![Live Feedback Architecture](assets/LiveFeedback.png)
+
 - **Rolling Buffer**: Implements FIFO frame management
 
   - Default capacity: 200 preprocessed frames (100 seconds at 2 fps)
