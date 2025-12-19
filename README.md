@@ -175,3 +175,101 @@ fitcoach
    year = {2024},
 }
 ```
+# Pose based Coaching Extension
+
+This branch ('pose-extension') adds a simple pose only baseline on top of the QEVD-FIT-COACH long-range dataset
+
+## Goal
+
+The main question we study is:
+
+> If we explicitly track human pose, can pose features alone tell when the coach gives corrective feedback vs. regular/encouraging feedback?
+
+The original STREAM-VLM model in the FitCoach paper uses a 3D CNN on RGB video as the vision backbone and does not explicitly use pose.  
+Here we build a pose only model and measure how well it can detect corrective feedback.
+
+# Data & Preprocessing
+
+- Dataset: QEVD-FIT-COACH long-range videos  
+  - We use the 74 test videos (~3.5 minutes each, 5–6 exercises per video)
+- For each long-range video we use:
+  - 'video_timestamps.npy' (provided by QEVD)
+  - 'feedbacks_long_range.json' (provided by QEVD, contains live coach feedback text + timestamps)
+- We additionally run MediaPipe Pose on each frame and save:
+  - One '.npy' per video with shape '(T, 33, 4)' (33 landmarks, x/y/z/visibility)
+
+Given a feedback with timestamp 't_feedback', we:
+
+1. Map the timestamp to frame indices using the video’s 'video_timestamps.npy'.
+2. Take a temporal window of +/-0.75 s around the feedback
+3. For all frames in this window, we keep only 'x, y, z'
+4. Compute mean and standard deviation of each joint coordinate:
+   - 33 joints x 3 coordinates x 2 (mean + std) = 198-dimensional pose feature per feedback
+5. Label each feedback as:
+   - '1' = corrective  
+   - '0' = non-corrective  
+   using a simple rule-based NLP heuristic over the text (presence of words like “lower”, “raise”, “bend”, “too fast”, etc.)
+
+Dataset summary (after filtering):
+
+- Non-empty feedbacks: ~159k
+- Class distribution: ~82% non-corrective (0), ~18% corrective (1)
+
+# Code and Notebook
+
+The full preprocessing and experiments live in:
+
+- 'notebooks/pose_feedback_baseline.ipynb'
+
+This notebook:
+
+1. Loads QEVD metadata and pose '.npy' files from local paths (see below)
+2. Builds the 198-D pose feature for each feedback
+3. Splits into train/test
+4. Trains:
+   - a class-weighted Logistic Regression baseline
+   - a 2-layer MLP on pose features
+5. Computes metrics (accuracy, precision/recall/F1, confusion matrix)
+6. Saves summary metrics to 'results/pose_feedback_results.csv' (path configurable at the top of the notebook)
+7. Produces diagnostic plots:
+   - PCA projection of pose features colored by corrective vs. non-corrective
+   - Precision–Recall curve for the corrective class
+
+# How to Run the Pose-Only Experiment
+
+1. Prepare data directories (in your environment / Colab):
+
+   - Place QEVD dataset as:
+
+     ```text
+     /path/to/FitCoach_Project/QEVD/FIT_COACH_BENCHMARK/...
+     ```
+
+   - Place pose files (MediaPipe outputs) as:
+
+     ```text
+     /path/to/FitCoach_Project/pose_features/pose_long/<video_id>_pose.npy
+     ```
+
+2. Open the notebook:
+
+   - Open 'notebooks/pose_feedback_baseline.ipynb'
+     in Jupyter or Colab
+   - Set the 'BASE' path at the top of the notebook to point to your
+     'FitCoach_Project' directory
+
+3. Run all cells:
+
+   - The notebook will:
+     - Build 'X' (pose features) and 'y' (labels)
+     - Train the models
+     - Print metrics and show plots
+     - Save `results/pose_feedback_results.csv`
+
+# Key Results (pose-only MLP)
+
+- Test accuracy: ~0.876  
+- F1 for corrective class: ~0.53  
+  (with precision ~ 0.81, recall ~ 0.40)
+
+Despite only using pose (no RGB, no text), the model can non-trivially predict when the coach gives corrective feedback.   This suggests that explicit pose features could be a useful backbone or side channel to feed into the STREAM-VLM cross-attention module in future work.
